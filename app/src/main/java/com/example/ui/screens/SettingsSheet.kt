@@ -106,6 +106,7 @@ import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
+import com.example.core.AiCliProfile
 import com.example.core.BookmarkEntry
 import com.example.core.BrowserCoreSnapshot
 import com.example.core.BrowserPreferences
@@ -154,6 +155,7 @@ fun SettingsSheet(
     snapshot: BrowserCoreSnapshot,
     foldablePosture: FoldablePostureUiState,
     initialOpenAiSettings: Boolean = false,
+    aiConnectionStatus: AiConnectionStatus? = null,
     onDismiss: () -> Unit,
     onUpdateBarGeometry: (
         cornerRadiusDp: Float?,
@@ -186,9 +188,11 @@ fun SettingsSheet(
         swipeLeftRightTabSwitch: Boolean?,
         doubleTapAction: Int?,
         gestureSensitivityDp: Float?,
+        longPressSwipeUpAiChatEnabled: Boolean?,
     ) -> Unit,
     onResetGestureSettings: () -> Unit,
     onSelectAiProfile: (String) -> Unit,
+    onTestConnectionAndFetchModels: (AiCliProfile) -> Unit,
     onUpdateAiProfile: (
         profileId: String,
         name: String?,
@@ -395,7 +399,12 @@ fun SettingsSheet(
                             SettingsCategory.AI_SETTINGS -> AiSettingsPage(
                                 snapshot = snapshot,
                                 unifiedRadius = unifiedRadius,
+                                connectionStatus = aiConnectionStatus,
                                 onSelectAiProfile = onSelectAiProfile,
+                                onTestConnectionAndFetchModels = onTestConnectionAndFetchModels,
+                                onToggleLongPressAiChat = { enabled ->
+                                    onUpdateGestureSettings(null, null, null, null, null, null, enabled)
+                                },
                                 onUpdateAiProfile = onUpdateAiProfile,
                                 onAddCustomAiProfile = onAddCustomAiProfile,
                                 onDeleteAiProfile = onDeleteAiProfile,
@@ -761,7 +770,7 @@ private fun TopLevelSettingsCategories(
         val activeAi = prefs.activeAiProfile()
         CategoryRowCard(
             category = SettingsCategory.AI_SETTINGS,
-            summary = "${activeAi.name} · ${activeAi.selectedModel}",
+            summary = "${activeAi.name} · ${activeAi.selectedModel.ifBlank { "모델 미선택" }}",
             unifiedRadius = unifiedRadius,
             onClick = { onSelectCategory(SettingsCategory.AI_SETTINGS) },
         )

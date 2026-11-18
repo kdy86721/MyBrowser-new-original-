@@ -179,7 +179,7 @@ data class AiCliProfile(
     val cliType: String,
     val endpointOrCommand: String,
     val apiKey: String = "",
-    val selectedModel: String,
+    val selectedModel: String = "",
     val availableModels: List<String> = emptyList(),
     val temperature: Float = 0.4f,
     val systemPrompt: String = DEFAULT_AI_SYSTEM_PROMPT,
@@ -189,6 +189,7 @@ data class AiCliProfile(
         const val CLI_TYPE_GEMINI = "gemini"
         const val CLI_TYPE_CLAUDE = "claude"
         const val CLI_TYPE_OPENAI = "openai"
+        const val CLI_TYPE_KIMI = "kimi"
         const val CLI_TYPE_OLLAMA = "ollama"
         const val CLI_TYPE_CUSTOM = "custom"
         const val DEFAULT_AI_SYSTEM_PROMPT =
@@ -233,6 +234,7 @@ data class BrowserPreferences(
     val swipeLeftRightTabSwitch: Boolean = true,
     val doubleTapAction: Int = GESTURE_SCROLL_TO_TOP,
     val gestureSensitivityDp: Float = DEFAULT_GESTURE_SENSITIVITY_DP,
+    val longPressSwipeUpAiChatEnabled: Boolean = true,
     val activeAiProfileId: String = DEFAULT_ACTIVE_AI_PROFILE_ID,
     val aiProfiles: List<AiCliProfile> = defaultAiProfiles(),
     val toolbarConfig: ToolbarConfig = ToolbarConfig(),
@@ -269,15 +271,18 @@ data class BrowserPreferences(
 
         const val DEFAULT_ACTIVE_AI_PROFILE_ID = "gemini_cli"
 
+        const val KIMI_GLOBAL_ENDPOINT = "https://api.moonshot.ai/v1"
+        const val KIMI_CHINA_ENDPOINT = "https://api.moonshot.cn/v1"
+
         fun defaultAiProfiles(): List<AiCliProfile> = listOf(
             AiCliProfile(
                 id = "gemini_cli",
                 name = "Gemini CLI",
                 cliType = AiCliProfile.CLI_TYPE_GEMINI,
-                endpointOrCommand = "https://generativelanguage.googleapis.com/v1beta/models",
+                endpointOrCommand = "https://generativelanguage.googleapis.com/v1beta",
                 apiKey = "",
-                selectedModel = "gemini-2.5-flash",
-                availableModels = listOf("gemini-2.5-pro", "gemini-2.5-flash", "gemini-2.0-flash"),
+                selectedModel = "",
+                availableModels = emptyList(),
                 temperature = 0.4f,
                 systemPrompt = AiCliProfile.DEFAULT_AI_SYSTEM_PROMPT,
                 isCustom = false,
@@ -288,8 +293,8 @@ data class BrowserPreferences(
                 cliType = AiCliProfile.CLI_TYPE_CLAUDE,
                 endpointOrCommand = "https://api.anthropic.com/v1/messages",
                 apiKey = "",
-                selectedModel = "claude-sonnet-4-5",
-                availableModels = listOf("claude-sonnet-4-5", "claude-opus-4-1", "claude-haiku-4-5"),
+                selectedModel = "",
+                availableModels = emptyList(),
                 temperature = 0.4f,
                 systemPrompt = AiCliProfile.DEFAULT_AI_SYSTEM_PROMPT,
                 isCustom = false,
@@ -298,10 +303,22 @@ data class BrowserPreferences(
                 id = "codex_openai_cli",
                 name = "Codex / OpenAI CLI",
                 cliType = AiCliProfile.CLI_TYPE_OPENAI,
-                endpointOrCommand = "https://api.openai.com/v1/chat/completions",
+                endpointOrCommand = "https://api.openai.com/v1",
                 apiKey = "",
-                selectedModel = "gpt-4.1",
-                availableModels = listOf("gpt-4.1", "o4-mini", "codex-mini"),
+                selectedModel = "",
+                availableModels = emptyList(),
+                temperature = 0.4f,
+                systemPrompt = AiCliProfile.DEFAULT_AI_SYSTEM_PROMPT,
+                isCustom = false,
+            ),
+            AiCliProfile(
+                id = "kimi_cli",
+                name = "Kimi CLI",
+                cliType = AiCliProfile.CLI_TYPE_KIMI,
+                endpointOrCommand = KIMI_GLOBAL_ENDPOINT,
+                apiKey = "",
+                selectedModel = "",
+                availableModels = emptyList(),
                 temperature = 0.4f,
                 systemPrompt = AiCliProfile.DEFAULT_AI_SYSTEM_PROMPT,
                 isCustom = false,
@@ -310,10 +327,10 @@ data class BrowserPreferences(
                 id = "ollama_cli",
                 name = "Ollama (로컬 CLI)",
                 cliType = AiCliProfile.CLI_TYPE_OLLAMA,
-                endpointOrCommand = "http://127.0.0.1:11434/api/chat",
+                endpointOrCommand = "http://127.0.0.1:11434",
                 apiKey = "",
-                selectedModel = "llama3.3",
-                availableModels = listOf("llama3.3", "qwen2.5-coder", "deepseek-r1", "gemma3"),
+                selectedModel = "",
+                availableModels = emptyList(),
                 temperature = 0.4f,
                 systemPrompt = AiCliProfile.DEFAULT_AI_SYSTEM_PROMPT,
                 isCustom = false,
@@ -322,10 +339,10 @@ data class BrowserPreferences(
                 id = "custom_cli_preset",
                 name = "사용자 지정 AI CLI",
                 cliType = AiCliProfile.CLI_TYPE_CUSTOM,
-                endpointOrCommand = "http://127.0.0.1:8080/v1/chat/completions",
+                endpointOrCommand = "http://127.0.0.1:8080/v1",
                 apiKey = "",
-                selectedModel = "custom-model",
-                availableModels = listOf("custom-model"),
+                selectedModel = "",
+                availableModels = emptyList(),
                 temperature = 0.4f,
                 systemPrompt = AiCliProfile.DEFAULT_AI_SYSTEM_PROMPT,
                 isCustom = true,
@@ -483,6 +500,7 @@ interface BrowserCoreBridge {
         swipeLeftRightTabSwitch: Boolean? = null,
         doubleTapAction: Int? = null,
         gestureSensitivityDp: Float? = null,
+        longPressSwipeUpAiChatEnabled: Boolean? = null,
     ): BrowserCoreSnapshot
 
     fun resetGestureSettings(): BrowserCoreSnapshot
@@ -498,6 +516,11 @@ interface BrowserCoreBridge {
         addCustomModel: String? = null,
         temperature: Float? = null,
         systemPrompt: String? = null,
+    ): BrowserCoreSnapshot
+
+    fun setAiProfileModels(
+        profileId: String,
+        models: List<String>,
     ): BrowserCoreSnapshot
 
     fun addCustomAiProfile(
@@ -685,7 +708,14 @@ class LocalKotlinCore(
         )
         _snapshotFlow.update { current ->
             val updatedTabs = current.tabs + newTab
-            val nextActive = if (activate) newTab.id else current.activeTabId
+            val lastIdx = (updatedTabs.size - 1).coerceAtLeast(0)
+            val resolvedActiveIdx = if (activate) {
+                updatedTabs.lastIndex.coerceIn(0, lastIdx)
+            } else {
+                val existingIdx = updatedTabs.indexOfFirst { it.id == current.activeTabId }
+                if (existingIdx >= 0) existingIdx.coerceIn(0, lastIdx) else 0
+            }
+            val nextActive = updatedTabs[resolvedActiveIdx].id
             val nextSecondary = when {
                 current.secondaryTabId != null && current.secondaryTabId != nextActive -> current.secondaryTabId
                 !activate && current.secondaryTabId == null -> newTab.id
@@ -703,15 +733,19 @@ class LocalKotlinCore(
     override fun switchTab(tabId: String): BrowserCoreSnapshot =
         synchronized(lock) {
             _snapshotFlow.update { current ->
-                if (current.tabs.any { it.id == tabId }) {
-                    val nextSecondary = if (current.secondaryTabId == tabId) {
-                        current.activeTabId.takeIf { it != tabId }
-                            ?: current.tabs.firstOrNull { it.id != tabId }?.id
+                if (current.tabs.isEmpty()) return@update current
+                val foundIdx = current.tabs.indexOfFirst { it.id == tabId }
+                if (foundIdx >= 0) {
+                    val safeIdx = foundIdx.coerceIn(0, (current.tabs.size - 1).coerceAtLeast(0))
+                    val resolvedId = current.tabs[safeIdx].id
+                    val nextSecondary = if (current.secondaryTabId == resolvedId) {
+                        current.activeTabId.takeIf { it != resolvedId && current.tabs.any { t -> t.id == it } }
+                            ?: current.tabs.firstOrNull { it.id != resolvedId }?.id
                     } else {
                         current.secondaryTabId
                     }
                     current.copy(
-                        activeTabId = tabId,
+                        activeTabId = resolvedId,
                         secondaryTabId = nextSecondary,
                     )
                 } else {
@@ -1083,6 +1117,7 @@ class LocalKotlinCore(
         swipeLeftRightTabSwitch: Boolean?,
         doubleTapAction: Int?,
         gestureSensitivityDp: Float?,
+        longPressSwipeUpAiChatEnabled: Boolean?,
     ): BrowserCoreSnapshot = synchronized(lock) {
         _snapshotFlow.update { current ->
             val p = current.preferences
@@ -1104,6 +1139,7 @@ class LocalKotlinCore(
                     ),
                     gestureSensitivityDp = (gestureSensitivityDp ?: p.gestureSensitivityDp)
                         .coerceIn(20f, 64f),
+                    longPressSwipeUpAiChatEnabled = longPressSwipeUpAiChatEnabled ?: p.longPressSwipeUpAiChatEnabled,
                 )
             )
         }
@@ -1121,6 +1157,7 @@ class LocalKotlinCore(
                         swipeLeftRightTabSwitch = true,
                         doubleTapAction = BrowserPreferences.GESTURE_SCROLL_TO_TOP,
                         gestureSensitivityDp = BrowserPreferences.DEFAULT_GESTURE_SENSITIVITY_DP,
+                        longPressSwipeUpAiChatEnabled = true,
                     )
                 )
             }
@@ -1165,7 +1202,7 @@ class LocalKotlinCore(
                     val nextSelectedModel = trimmedCustomModel
                         ?: selectedModel?.trim()?.takeIf { it.isNotEmpty() }
                         ?: profile.selectedModel
-                    val ensuredModels = if (nextSelectedModel !in nextModels) {
+                    val ensuredModels = if (nextSelectedModel.isNotBlank() && nextSelectedModel !in nextModels) {
                         nextModels + nextSelectedModel
                     } else {
                         nextModels
@@ -1188,6 +1225,34 @@ class LocalKotlinCore(
         _snapshotFlow.value
     }
 
+    override fun setAiProfileModels(
+        profileId: String,
+        models: List<String>,
+    ): BrowserCoreSnapshot = synchronized(lock) {
+        val cleaned = models.map { it.trim() }.filter { it.isNotEmpty() }.distinct()
+        _snapshotFlow.update { current ->
+            val updatedList = current.preferences.aiProfiles.map { profile ->
+                if (profile.id != profileId) {
+                    profile
+                } else {
+                    val nextSelected = when {
+                        cleaned.isEmpty() -> profile.selectedModel
+                        profile.selectedModel.isBlank() || profile.selectedModel !in cleaned -> cleaned.first()
+                        else -> profile.selectedModel
+                    }
+                    profile.copy(
+                        availableModels = cleaned,
+                        selectedModel = nextSelected,
+                    )
+                }
+            }
+            current.copy(
+                preferences = current.preferences.copy(aiProfiles = updatedList)
+            )
+        }
+        _snapshotFlow.value
+    }
+
     override fun addCustomAiProfile(
         name: String,
         cliType: String,
@@ -1198,8 +1263,8 @@ class LocalKotlinCore(
         systemPrompt: String,
     ): BrowserCoreSnapshot = synchronized(lock) {
         val cleanName = name.trim().ifEmpty { "사용자 지정 AI CLI" }
-        val cleanModel = selectedModel.trim().ifEmpty { "custom-model" }
-        val cleanEndpoint = endpointOrCommand.trim().ifEmpty { "http://127.0.0.1:8080/v1/chat/completions" }
+        val cleanModel = selectedModel.trim()
+        val cleanEndpoint = endpointOrCommand.trim().ifEmpty { "http://127.0.0.1:8080/v1" }
         val newProfile = AiCliProfile(
             id = "custom_ai_${aiProfileSequence++}",
             name = cleanName,
@@ -1207,7 +1272,7 @@ class LocalKotlinCore(
             endpointOrCommand = cleanEndpoint,
             apiKey = apiKey,
             selectedModel = cleanModel,
-            availableModels = listOf(cleanModel),
+            availableModels = if (cleanModel.isNotEmpty()) listOf(cleanModel) else emptyList(),
             temperature = temperature.coerceIn(0f, 1.5f),
             systemPrompt = systemPrompt.ifBlank { AiCliProfile.DEFAULT_AI_SYSTEM_PROMPT },
             isCustom = true,
@@ -1402,11 +1467,10 @@ class LocalKotlinCore(
                 decoded.history.take(MAX_HISTORY_ENTRIES).forEach { historyBuffer.addLast(it) }
                 bookmarkList.clear()
                 bookmarkList.addAll(decoded.bookmarks)
-                val activeId = if (decoded.tabs.any { it.id == decoded.activeTabId }) {
-                    decoded.activeTabId
-                } else {
-                    decoded.tabs.first().id
-                }
+                val foundActiveIdx = decoded.tabs.indexOfFirst { it.id == decoded.activeTabId }
+                val safeActiveIdx = (if (foundActiveIdx >= 0) foundActiveIdx else 0)
+                    .coerceIn(0, (decoded.tabs.size - 1).coerceAtLeast(0))
+                val activeId = decoded.tabs[safeActiveIdx].id
                 val secondaryId = decoded.secondaryTabId
                     ?.takeIf { sec -> sec != activeId && decoded.tabs.any { it.id == sec } }
                 val p = decoded.preferences

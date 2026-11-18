@@ -11,8 +11,6 @@ import android.graphics.Canvas
 import android.net.Uri
 import android.os.Bundle
 import android.os.Environment
-import android.os.Handler
-import android.os.Looper
 import android.os.Message
 import android.view.MotionEvent
 import android.view.View
@@ -37,14 +35,20 @@ import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.FastOutSlowInEasing
+import androidx.compose.animation.core.Spring
 import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
+import androidx.compose.animation.expandVertically
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.scaleIn
 import androidx.compose.animation.scaleOut
+import androidx.compose.animation.shrinkVertically
 import androidx.compose.animation.slideInHorizontally
+import androidx.compose.animation.slideInVertically
 import androidx.compose.animation.slideOutHorizontally
+import androidx.compose.animation.slideOutVertically
 import androidx.compose.foundation.background
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Box
@@ -62,6 +66,7 @@ import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateMapOf
@@ -95,7 +100,9 @@ import androidx.webkit.WebViewFeature
 import androidx.window.layout.FoldingFeature
 import androidx.window.layout.WindowInfoTracker
 import androidx.window.layout.WindowLayoutInfo
+import com.example.core.AiChatTurn
 import com.example.core.AiCliHttpClient
+import com.example.core.AiCliProfile
 import com.example.core.BookmarkEntry
 import com.example.core.BrowserCoreBridge
 import com.example.core.BrowserCoreSnapshot
@@ -104,6 +111,7 @@ import com.example.core.BrowserTabState
 import com.example.core.HistoryEntry
 import com.example.core.LocalKotlinCore
 import com.example.core.MissingApiKeyException
+import com.example.core.MissingModelSelectionException
 import com.example.core.QuickToggleAction
 import com.example.core.QuickToggleLayoutStyle
 import com.example.core.SearchEngine
@@ -112,6 +120,9 @@ import com.example.core.ToolbarAction
 import com.example.ui.components.FloatingControlBar
 import com.example.ui.components.FoldablePostureUiState
 import com.example.ui.components.QuickToggleDropdownMenu
+import com.example.ui.screens.AiChatSheet
+import com.example.ui.screens.AiChatUiState
+import com.example.ui.screens.AiConnectionStatus
 import com.example.ui.screens.GridTabSwitcherScreen
 import com.example.ui.screens.HistoryAndBookmarksSheet
 import com.example.ui.screens.PageSummarySheet
@@ -120,7 +131,10 @@ import com.example.ui.screens.SettingsSheet
 import com.example.ui.theme.IceCyan
 import com.example.ui.theme.MyBrowserTheme
 import com.example.ui.theme.ObsidianVoid
+import androidx.lifecycle.viewModelScope
+import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
@@ -143,6 +157,7 @@ private enum class PushOverlay {
     SETTINGS,
     HISTORY,
     SUMMARY,
+    AI_CHAT,
 }
 
 class BrowserViewModel(
@@ -150,6 +165,9 @@ class BrowserViewModel(
 ) : ViewModel() {
 
     val snapshotFlow: StateFlow<BrowserCoreSnapshot> = core.snapshotFlow
+
+    private val _aiConnectionStatus = MutableStateFlow<AiConnectionStatus?>(null)
+    val aiConnectionStatusFlow: StateFlow<AiConnectionStatus?> = _aiConnectionStatus.asStateFlow()
 
     // Retained per-tab WebView state Bundles across configuration / activity restarts
     private val savedTabBundles = mutableMapOf<String, Bundle>()
@@ -333,6 +351,7 @@ class BrowserViewModel(
         swipeLeftRightTabSwitch: Boolean? = null,
         doubleTapAction: Int? = null,
         gestureSensitivityDp: Float? = null,
+        longPressSwipeUpAiChatEnabled: Boolean? = null,
     ) {
         core.updateGestureSettings(
             gesturesEnabled = gesturesEnabled,
@@ -341,6 +360,7 @@ class BrowserViewModel(
             swipeLeftRightTabSwitch = swipeLeftRightTabSwitch,
             doubleTapAction = doubleTapAction,
             gestureSensitivityDp = gestureSensitivityDp,
+            longPressSwipeUpAiChatEnabled = longPressSwipeUpAiChatEnabled,
         )
     }
 
@@ -350,6 +370,44 @@ class BrowserViewModel(
 
     fun selectAiProfile(profileId: String) {
         core.selectAiProfile(profileId)
+    }
+
+    fun testConnectionAndFetchModels(profile: AiCliProfile) {
+        viewModelScope.launch {
+            _aiConnectionStatus.value = AiConnectionStatus(
+                profileId = profile.id,
+                isChecking = true,
+                isConnected = false,
+                modelCount = profile.availableModels.size,
+                statusMessage = "${profile.name} 연결 확인 및 모델 목록 불러오는 중...",
+                isError = false,
+            )
+            val result = AiCliHttpClient.fetchAvailableModels(profile)
+            result.onSuccess { models ->
+                core.setAiProfileModels(profile.id, models)
+                _aiConnectionStatus.value = AiConnectionStatus(
+                    profileId = profile.id,
+                    isChecking = false,
+                    isConnected = true,
+                    modelCount = models.size,
+                    statusMessage = "연결됨 · ${models.size}개 모델 불러옴",
+                    isError = false,
+                )
+            }.onFailure { err ->
+                val message = when (err) {
+                    is MissingApiKeyException -> "API 키를 입력하면 연결 확인 및 모델 목록을 불러옵니다."
+                    else -> err.message ?: "연결 확인 및 모델 목록 조회에 실패했습니다."
+                }
+                _aiConnectionStatus.value = AiConnectionStatus(
+                    profileId = profile.id,
+                    isChecking = false,
+                    isConnected = false,
+                    modelCount = profile.availableModels.size,
+                    statusMessage = message,
+                    isError = err !is MissingApiKeyException,
+                )
+            }
+        }
     }
 
     fun updateAiProfile(
@@ -500,6 +558,7 @@ private fun MyBrowserRootScreen(
     val snapshotState = viewModel.snapshotFlow.collectAsStateWithLifecycle()
     val snapshot = snapshotState.value
     val prefs = snapshot.preferences
+    val aiConnectionStatus by viewModel.aiConnectionStatusFlow.collectAsStateWithLifecycle()
 
     var windowLayoutInfo by remember { mutableStateOf<WindowLayoutInfo?>(null) }
     DisposableEffect(activity) {
@@ -530,6 +589,7 @@ private fun MyBrowserRootScreen(
     var activeOverlay by remember { mutableStateOf(PushOverlay.NONE) }
     var openSettingsDirectlyToAi by remember { mutableStateOf(false) }
     var pageSummaryState by remember { mutableStateOf(PageSummaryState()) }
+    var aiChatUiState by remember { mutableStateOf(AiChatUiState()) }
 
     // Fullscreen HTML5 <video> custom view state
     var fullscreenVideoView by remember { mutableStateOf<View?>(null) }
@@ -562,24 +622,15 @@ private fun MyBrowserRootScreen(
         }
     }
 
-    val webViewPool = remember { mutableStateMapOf<String, WebView>() }
+    val webViewPool = remember { mutableMapOf<String, WebView>() }
     val tabThumbnails = remember { mutableStateMapOf<String, Bitmap>() }
-    val mainHandler = remember { Handler(Looper.getMainLooper()) }
 
-    fun scheduleBitmapRecycle(bitmap: Bitmap?) {
-        if (bitmap == null || bitmap.isRecycled) return
-        mainHandler.postDelayed({
-            if (!bitmap.isRecycled) {
-                bitmap.recycle()
-            }
-        }, 180L)
-    }
-
-    fun captureTabThumbnail(tabId: String, wv: WebView?) {
-        if (wv == null || wv.width <= 0 || wv.height <= 0) return
+    fun captureTabThumbnail(tabId: String, wv: WebView?): Bitmap? {
+        if (wv == null || wv.width <= 0 || wv.height <= 0) return null
         val targetWidth = 360
         val ratio = wv.height.toFloat() / wv.width.toFloat()
         val targetHeight = (targetWidth * ratio).roundToInt().coerceIn(180, 620)
+        if (targetWidth <= 0 || targetHeight <= 0) return null
         val captured = runCatching {
             val bmp = Bitmap.createBitmap(targetWidth, targetHeight, Bitmap.Config.RGB_565)
             val canvas = Canvas(bmp)
@@ -588,11 +639,9 @@ private fun MyBrowserRootScreen(
             canvas.translate(-wv.scrollX.toFloat(), -wv.scrollY.toFloat())
             wv.draw(canvas)
             bmp
-        }.getOrNull() ?: return
-        val previous = tabThumbnails.put(tabId, captured)
-        if (previous != null && previous !== captured) {
-            scheduleBitmapRecycle(previous)
-        }
+        }.getOrNull() ?: return null
+        tabThumbnails[tabId] = captured
+        return captured
     }
 
     // Keep latest callbacks safe for long-lived WebChromeClient / WebViewClient closures
@@ -675,13 +724,13 @@ private fun MyBrowserRootScreen(
         }
     }
 
-    // Cleanly destroy closed tab WebViews & recycle thumbnails to eliminate CPU/memory leaks
+    // Cleanly destroy closed tab WebViews & remove stale thumbnails to eliminate CPU/memory leaks
     LaunchedEffect(snapshot.tabs) {
         val openIds = snapshot.tabs.map { it.id }.toSet()
         val staleIds = (webViewPool.keys + tabThumbnails.keys).distinct().filter { it !in openIds }
         staleIds.forEach { staleId ->
             viewModel.removeTabBundle(staleId)
-            scheduleBitmapRecycle(tabThumbnails.remove(staleId))
+            tabThumbnails.remove(staleId)
             webViewPool.remove(staleId)?.let { wv ->
                 destroyWebViewCleanly(wv)
             }
@@ -692,10 +741,6 @@ private fun MyBrowserRootScreen(
         onDispose {
             pendingFileCallback?.onReceiveValue(null)
             pendingFileCallback = null
-            mainHandler.removeCallbacksAndMessages(null)
-            tabThumbnails.values.forEach { bmp ->
-                if (!bmp.isRecycled) bmp.recycle()
-            }
             tabThumbnails.clear()
             webViewPool.forEach { (tabId, wv) ->
                 val bundle = Bundle()
@@ -800,9 +845,13 @@ private fun MyBrowserRootScreen(
                 !isEditingAddress &&
                 !isFindInPageOpen &&
                 !isTabDrawerOpen &&
-                (focusedTab?.canGoBack == true || focusedWebView?.canGoBack() == true)
+                focusedTab?.canGoBack == true
         ) {
-            focusedWebView?.goBack()
+            webViewPool[focusedTabId]?.let { wv ->
+                if (wv.canGoBack()) {
+                    wv.goBack()
+                }
+            }
         }
 
         // Secondary overlays (Find-in-Page / Tab Dock)
@@ -830,6 +879,10 @@ private fun MyBrowserRootScreen(
                 false
             } else {
                 captureTabThumbnail(focusedTabId, focusedWebView)
+                isTabDrawerOpen = false
+                isGridTabSwitcherOpen = false
+                rawScrollCollapsed = false
+                accumulatedScrollDeltaPx = 0f
                 val nextSnap = viewModel.createTab(initialUrl = "about:blank", isIncognito = false)
                 val newTab = nextSnap.activeTab
                 if (newTab == null) {
@@ -854,7 +907,7 @@ private fun MyBrowserRootScreen(
                     )
                     webViewPool[newTab.id] = popupWebView
                     transport.webView = popupWebView
-                    resultMsg.sendToTarget()
+                    runCatching { resultMsg.sendToTarget() }
                     true
                 }
             }
@@ -864,8 +917,11 @@ private fun MyBrowserRootScreen(
             val tabsList = snapshot.tabs
             if (tabsList.size > 1) {
                 captureTabThumbnail(focusedTabId, focusedWebView)
-                val currentIdx = tabsList.indexOfFirst { it.id == focusedTabId }.coerceAtLeast(0)
-                val targetIdx = ((currentIdx + delta) % tabsList.size + tabsList.size) % tabsList.size
+                val lastIdx = (tabsList.size - 1).coerceAtLeast(0)
+                val foundIdx = tabsList.indexOfFirst { it.id == focusedTabId }
+                val currentIdx = (if (foundIdx >= 0) foundIdx else 0).coerceIn(0, lastIdx)
+                val targetIdx = (((currentIdx + delta) % tabsList.size + tabsList.size) % tabsList.size)
+                    .coerceIn(0, lastIdx)
                 val targetId = tabsList[targetIdx].id
                 if (isDualPaneActive && focusedPaneIndex == 1 && targetId != snapshot.activeTabId) {
                     viewModel.setSecondaryTab(targetId)
@@ -914,6 +970,8 @@ private fun MyBrowserRootScreen(
                     val friendlyMessage = when (err) {
                         is MissingApiKeyException ->
                             "${err.profileName} API 키가 설정되지 않았습니다. 아래 'AI 설정' 버튼을 눌러 키를 등록하거나 로컬 Ollama CLI를 선택해 주세요. (로컬 DOM 요약은 아래에서 바로 확인 가능합니다)"
+                        is MissingModelSelectionException ->
+                            err.message ?: "사용할 AI 모델이 선택되지 않았습니다. 'AI 설정'에서 연결 확인 및 모델 불러오기를 실행해 주세요."
                         else ->
                             "AI 응답 호출 실패: ${err.message ?: "네트워크 또는 엔드포인트 연결을 확인해 주세요."}"
                     }
@@ -921,6 +979,87 @@ private fun MyBrowserRootScreen(
                         aiIsLoading = false,
                         aiErrorMessage = friendlyMessage,
                     )
+                }
+            }
+        }
+
+        val launchAiChatWithUrl: (String) -> Unit = { currentUrl ->
+            isTabDrawerOpen = false
+            isGridTabSwitcherOpen = false
+            isQuickMenuOpen = false
+            isFindInPageOpen = false
+            isEditingAddress = false
+            rawScrollCollapsed = false
+            accumulatedScrollDeltaPx = 0f
+
+            val cleanUrl = currentUrl.trim()
+            val cleanTitle = focusedTab?.title.orEmpty()
+            val seed = aiChatUiState.sessionSeed + 1
+            aiChatUiState = aiChatUiState.copy(
+                sessionSeed = seed,
+                prefillUrl = cleanUrl,
+                pageTitle = cleanTitle,
+                pageBodyText = "",
+                errorMessage = null,
+            )
+            activeOverlay = PushOverlay.AI_CHAT
+
+            // Optionally pre-extract visible DOM text in background without blocking or auto-sending
+            if (focusedWebView != null && prefs.javaScriptEnabled) {
+                extractDomPageSummary(
+                    webView = focusedWebView,
+                    json = summaryJson,
+                    fallbackUrl = cleanUrl,
+                    fallbackTitle = cleanTitle,
+                ) { parsed ->
+                    if (parsed.errorMessage == null && parsed.bodyPreviewText.isNotBlank()) {
+                        aiChatUiState = aiChatUiState.copy(
+                            pageTitle = parsed.title.ifBlank { cleanTitle },
+                            pageBodyText = parsed.bodyPreviewText,
+                        )
+                    }
+                }
+            }
+        }
+
+        val sendAiChatMessage: (String) -> Unit = { rawMessage ->
+            val cleanMessage = rawMessage.trim()
+            if (cleanMessage.isNotEmpty() && !aiChatUiState.isLoading) {
+                val activeProfile = snapshotState.value.preferences.activeAiProfile()
+                val updatedHistory = aiChatUiState.messages + AiChatTurn(isUser = true, text = cleanMessage)
+                aiChatUiState = aiChatUiState.copy(
+                    messages = updatedHistory,
+                    isLoading = true,
+                    errorMessage = null,
+                )
+                coroutineScope.launch {
+                    val result = AiCliHttpClient.requestAiChat(
+                        profile = activeProfile,
+                        conversation = updatedHistory,
+                        pageTitle = aiChatUiState.pageTitle,
+                        pageUrl = aiChatUiState.prefillUrl,
+                        pageContentText = aiChatUiState.pageBodyText,
+                    )
+                    result.onSuccess { resp ->
+                        aiChatUiState = aiChatUiState.copy(
+                            messages = aiChatUiState.messages + AiChatTurn(isUser = false, text = resp.text),
+                            isLoading = false,
+                            errorMessage = null,
+                        )
+                    }.onFailure { err ->
+                        val friendlyMessage = when (err) {
+                            is MissingApiKeyException ->
+                                "${err.profileName} API 키가 설정되지 않았습니다. 상단 'AI 설정'을 눌러 키를 등록하거나 로컬 Ollama CLI를 선택해 주세요."
+                            is MissingModelSelectionException ->
+                                err.message ?: "사용할 모델이 선택되지 않았습니다. 상단 'AI 설정'에서 연결 확인 및 모델 불러오기를 실행해 주세요."
+                            else ->
+                                "AI 응답 호출 실패: ${err.message ?: "네트워크 또는 엔드포인트 연결을 확인해 주세요."}"
+                        }
+                        aiChatUiState = aiChatUiState.copy(
+                            isLoading = false,
+                            errorMessage = friendlyMessage,
+                        )
+                    }
                 }
             }
         }
@@ -1037,9 +1176,17 @@ private fun MyBrowserRootScreen(
             }
         }
 
-        // Underlying browser parallax offset during Push Transition
+        // Underlying browser parallax offset during horizontal Push Transitions (Settings, History, Summary)
         val parallaxProgress by animateFloatAsState(
-            targetValue = if (activeOverlay != PushOverlay.NONE) 1f else 0f,
+            targetValue = if (
+                activeOverlay == PushOverlay.SETTINGS ||
+                activeOverlay == PushOverlay.HISTORY ||
+                activeOverlay == PushOverlay.SUMMARY
+            ) {
+                1f
+            } else {
+                0f
+            },
             animationSpec = tween(durationMillis = 300, easing = FastOutSlowInEasing),
             label = "browser_push_parallax",
         )
@@ -1063,13 +1210,68 @@ private fun MyBrowserRootScreen(
                         .fillMaxSize()
                         .testTag("dual_pane_container"),
                 ) {
+                    key(primaryTab.id) {
+                        WebViewPane(
+                            tab = primaryTab,
+                            preferences = prefs,
+                            webViewPool = webViewPool,
+                            viewModel = viewModel,
+                            isDualPane = true,
+                            isFocusedPane = focusedPaneIndex == 0,
+                            onPaneFocused = { focusedPaneIndex = 0 },
+                            onScrollDelta = onScrollDelta,
+                            onOpenFileChooser = onOpenFileChooser,
+                            onCreateNewWindow = onCreateNewWindowTab,
+                            onCloseWindow = { wv -> closeWindowByWebView(wv, webViewPool, viewModel) },
+                            onShowCustomView = onShowFullscreenVideo,
+                            onHideCustomView = onHideFullscreenVideo,
+                            onCaptureThumbnail = { id, wv -> captureTabThumbnail(id, wv) },
+                            modifier = Modifier
+                                .weight(1f)
+                                .fillMaxHeight()
+                                .testTag("dual_pane_left_webview"),
+                        )
+                    }
+
+                    Box(
+                        modifier = Modifier
+                            .width(centerGapDp)
+                            .fillMaxHeight()
+                            .background(Color(0xFF050810)),
+                    )
+
+                    key(secondaryTab.id) {
+                        WebViewPane(
+                            tab = secondaryTab,
+                            preferences = prefs,
+                            webViewPool = webViewPool,
+                            viewModel = viewModel,
+                            isDualPane = true,
+                            isFocusedPane = focusedPaneIndex == 1,
+                            onPaneFocused = { focusedPaneIndex = 1 },
+                            onScrollDelta = onScrollDelta,
+                            onOpenFileChooser = onOpenFileChooser,
+                            onCreateNewWindow = onCreateNewWindowTab,
+                            onCloseWindow = { wv -> closeWindowByWebView(wv, webViewPool, viewModel) },
+                            onShowCustomView = onShowFullscreenVideo,
+                            onHideCustomView = onHideFullscreenVideo,
+                            onCaptureThumbnail = { id, wv -> captureTabThumbnail(id, wv) },
+                            modifier = Modifier
+                                .weight(1f)
+                                .fillMaxHeight()
+                                .testTag("dual_pane_right_webview"),
+                        )
+                    }
+                }
+            } else if (primaryTab != null) {
+                key(primaryTab.id) {
                     WebViewPane(
                         tab = primaryTab,
                         preferences = prefs,
                         webViewPool = webViewPool,
                         viewModel = viewModel,
-                        isDualPane = true,
-                        isFocusedPane = focusedPaneIndex == 0,
+                        isDualPane = false,
+                        isFocusedPane = true,
                         onPaneFocused = { focusedPaneIndex = 0 },
                         onScrollDelta = onScrollDelta,
                         onOpenFileChooser = onOpenFileChooser,
@@ -1079,59 +1281,10 @@ private fun MyBrowserRootScreen(
                         onHideCustomView = onHideFullscreenVideo,
                         onCaptureThumbnail = { id, wv -> captureTabThumbnail(id, wv) },
                         modifier = Modifier
-                            .weight(1f)
-                            .fillMaxHeight()
-                            .testTag("dual_pane_left_webview"),
-                    )
-
-                    Box(
-                        modifier = Modifier
-                            .width(centerGapDp)
-                            .fillMaxHeight()
-                            .background(Color(0xFF050810)),
-                    )
-
-                    WebViewPane(
-                        tab = secondaryTab,
-                        preferences = prefs,
-                        webViewPool = webViewPool,
-                        viewModel = viewModel,
-                        isDualPane = true,
-                        isFocusedPane = focusedPaneIndex == 1,
-                        onPaneFocused = { focusedPaneIndex = 1 },
-                        onScrollDelta = onScrollDelta,
-                        onOpenFileChooser = onOpenFileChooser,
-                        onCreateNewWindow = onCreateNewWindowTab,
-                        onCloseWindow = { wv -> closeWindowByWebView(wv, webViewPool, viewModel) },
-                        onShowCustomView = onShowFullscreenVideo,
-                        onHideCustomView = onHideFullscreenVideo,
-                        onCaptureThumbnail = { id, wv -> captureTabThumbnail(id, wv) },
-                        modifier = Modifier
-                            .weight(1f)
-                            .fillMaxHeight()
-                            .testTag("dual_pane_right_webview"),
+                            .fillMaxSize()
+                            .testTag("fullscreen_webview"),
                     )
                 }
-            } else if (primaryTab != null) {
-                WebViewPane(
-                    tab = primaryTab,
-                    preferences = prefs,
-                    webViewPool = webViewPool,
-                    viewModel = viewModel,
-                    isDualPane = false,
-                    isFocusedPane = true,
-                    onPaneFocused = { focusedPaneIndex = 0 },
-                    onScrollDelta = onScrollDelta,
-                    onOpenFileChooser = onOpenFileChooser,
-                    onCreateNewWindow = onCreateNewWindowTab,
-                    onCloseWindow = { wv -> closeWindowByWebView(wv, webViewPool, viewModel) },
-                    onShowCustomView = onShowFullscreenVideo,
-                    onHideCustomView = onHideFullscreenVideo,
-                    onCaptureThumbnail = { id, wv -> captureTabThumbnail(id, wv) },
-                    modifier = Modifier
-                        .fillMaxSize()
-                        .testTag("fullscreen_webview"),
-                )
             }
 
             // Subtle top status-bar gradient scrim
@@ -1304,6 +1457,9 @@ private fun MyBrowserRootScreen(
                     onAddressSwipeDown = { triggerAddressGestureAction(prefs.swipeDownAction) },
                     onAddressSwipeTab = { delta -> switchTabRelative(delta) },
                     onAddressDoubleTap = { triggerAddressGestureAction(prefs.doubleTapAction) },
+                    onLongPressSwipeUpAiChat = {
+                        launchAiChatWithUrl(focusedTab?.url.orEmpty())
+                    },
                     modifier = Modifier.align(Alignment.BottomCenter),
                 )
             }
@@ -1447,6 +1603,7 @@ private fun MyBrowserRootScreen(
                 snapshot = snapshot,
                 foldablePosture = foldablePosture,
                 initialOpenAiSettings = openSettingsDirectlyToAi,
+                aiConnectionStatus = aiConnectionStatus,
                 onDismiss = {
                     activeOverlay = PushOverlay.NONE
                     openSettingsDirectlyToAi = false
@@ -1483,7 +1640,7 @@ private fun MyBrowserRootScreen(
                     )
                 },
                 onResetFoldableSettings = { viewModel.resetFoldableSettings() },
-                onUpdateGestureSettings = { enabled, upAction, downAction, leftRightTab, dblTap, sensitivity ->
+                onUpdateGestureSettings = { enabled, upAction, downAction, leftRightTab, dblTap, sensitivity, longPressAi ->
                     viewModel.updateGestureSettings(
                         gesturesEnabled = enabled,
                         swipeUpAction = upAction,
@@ -1491,10 +1648,14 @@ private fun MyBrowserRootScreen(
                         swipeLeftRightTabSwitch = leftRightTab,
                         doubleTapAction = dblTap,
                         gestureSensitivityDp = sensitivity,
+                        longPressSwipeUpAiChatEnabled = longPressAi,
                     )
                 },
                 onResetGestureSettings = { viewModel.resetGestureSettings() },
                 onSelectAiProfile = { viewModel.selectAiProfile(it) },
+                onTestConnectionAndFetchModels = { profile ->
+                    viewModel.testConnectionAndFetchModels(profile)
+                },
                 onUpdateAiProfile = { id, name, endpoint, apiKey, model, addModel, temp, prompt ->
                     viewModel.updateAiProfile(
                         profileId = id,
@@ -1654,6 +1815,67 @@ private fun MyBrowserRootScreen(
             )
         }
 
+        // 4.5 Spring Bottom-Sheet Transition: Liquid Glass AI Chat (Long-Press + Swipe Up with URL pre-filled)
+        AnimatedVisibility(
+            visible = activeOverlay == PushOverlay.AI_CHAT,
+            enter = fadeIn(animationSpec = tween(durationMillis = 220)),
+            exit = fadeOut(animationSpec = tween(durationMillis = 200)),
+        ) {
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .background(Color.Black.copy(alpha = 0.42f))
+            )
+        }
+
+        AnimatedVisibility(
+            visible = activeOverlay == PushOverlay.AI_CHAT,
+            enter = slideInVertically(
+                animationSpec = spring(
+                    dampingRatio = 0.84f,
+                    stiffness = Spring.StiffnessMediumLow,
+                ),
+                initialOffsetY = { it },
+            ) + expandVertically(
+                expandFrom = Alignment.Bottom,
+                animationSpec = spring(
+                    dampingRatio = 0.84f,
+                    stiffness = Spring.StiffnessMediumLow,
+                ),
+            ),
+            exit = slideOutVertically(
+                animationSpec = spring(
+                    dampingRatio = 0.86f,
+                    stiffness = Spring.StiffnessMediumLow,
+                ),
+                targetOffsetY = { it },
+            ) + shrinkVertically(
+                shrinkTowards = Alignment.Bottom,
+                animationSpec = spring(
+                    dampingRatio = 0.86f,
+                    stiffness = Spring.StiffnessMediumLow,
+                ),
+            ),
+        ) {
+            AiChatSheet(
+                chatState = aiChatUiState,
+                activeProfile = prefs.activeAiProfile(),
+                unifiedRadius = prefs.barCornerRadiusDp.dp,
+                onDismiss = { activeOverlay = PushOverlay.NONE },
+                onSendMessage = sendAiChatMessage,
+                onClearChat = {
+                    aiChatUiState = aiChatUiState.copy(
+                        messages = emptyList(),
+                        errorMessage = null,
+                    )
+                },
+                onOpenAiSettings = {
+                    openSettingsDirectlyToAi = true
+                    activeOverlay = PushOverlay.SETTINGS
+                },
+            )
+        }
+
         // 5. Full-Screen 2-Column Grid Preview Tab Switcher
         AnimatedVisibility(
             visible = isGridTabSwitcherOpen && activeOverlay == PushOverlay.NONE && fullscreenVideoView == null,
@@ -1762,6 +1984,14 @@ private fun WebViewPane(
     val latestOnHideCustomView by rememberUpdatedState(onHideCustomView)
     val latestOnCaptureThumbnail by rememberUpdatedState(onCaptureThumbnail)
 
+    DisposableEffect(tab.id) {
+        onDispose {
+            webViewPool[tab.id]?.let { wv ->
+                (wv.parent as? ViewGroup)?.removeView(wv)
+            }
+        }
+    }
+
     Column(modifier = modifier) {
         if (isDualPane) {
             Box(
@@ -1840,6 +2070,15 @@ private fun WebViewPane(
                         ),
                     )
                 }
+            },
+            onRelease = { container ->
+                for (i in 0 until container.childCount) {
+                    val child = container.getChildAt(i)
+                    if (child is WebView) {
+                        child.setOnTouchListener(null)
+                    }
+                }
+                container.removeAllViews()
             },
             modifier = Modifier.fillMaxSize(),
         )

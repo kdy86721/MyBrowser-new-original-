@@ -23,6 +23,7 @@ import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
@@ -34,12 +35,14 @@ import androidx.compose.material.icons.rounded.Add
 import androidx.compose.material.icons.rounded.AutoAwesome
 import androidx.compose.material.icons.rounded.Check
 import androidx.compose.material.icons.rounded.Close
+import androidx.compose.material.icons.rounded.CloudSync
 import androidx.compose.material.icons.rounded.DeleteOutline
 import androidx.compose.material.icons.rounded.Key
 import androidx.compose.material.icons.rounded.Link
 import androidx.compose.material.icons.rounded.Refresh
 import androidx.compose.material.icons.rounded.Settings
 import androidx.compose.material.icons.rounded.Terminal
+import androidx.compose.material.icons.rounded.TouchApp
 import androidx.compose.material.icons.rounded.Visibility
 import androidx.compose.material.icons.rounded.VisibilityOff
 import androidx.compose.material3.Button
@@ -53,6 +56,8 @@ import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Slider
 import androidx.compose.material3.SliderDefaults
+import androidx.compose.material3.Switch
+import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -77,6 +82,7 @@ import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import com.example.core.AiCliProfile
 import com.example.core.BrowserCoreSnapshot
+import com.example.core.BrowserPreferences
 import com.example.ui.theme.AmberWarn
 import com.example.ui.theme.CrimsonStop
 import com.example.ui.theme.EmeraldSecure
@@ -88,6 +94,16 @@ import com.example.ui.theme.ObsidianVoid
 import com.example.ui.theme.PureFrost
 import com.example.ui.theme.unifiedInnerRadius
 import kotlin.math.roundToInt
+
+@Immutable
+data class AiConnectionStatus(
+    val profileId: String = "",
+    val isChecking: Boolean = false,
+    val isConnected: Boolean = false,
+    val modelCount: Int = 0,
+    val statusMessage: String = "",
+    val isError: Boolean = false,
+)
 
 @Immutable
 data class PageSummaryState(
@@ -543,7 +559,10 @@ fun PageSummarySheet(
 fun AiSettingsPage(
     snapshot: BrowserCoreSnapshot,
     unifiedRadius: Dp,
+    connectionStatus: AiConnectionStatus?,
     onSelectAiProfile: (String) -> Unit,
+    onTestConnectionAndFetchModels: (AiCliProfile) -> Unit,
+    onToggleLongPressAiChat: (Boolean) -> Unit,
     onUpdateAiProfile: (
         profileId: String,
         name: String?,
@@ -571,6 +590,52 @@ fun AiSettingsPage(
     val cardShape = RoundedCornerShape(unifiedRadius)
 
     var showAddForm by remember { mutableStateOf(false) }
+
+    // Gesture integration toggle inside AI Settings
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(cardShape)
+            .background(ObsidianElevated.copy(alpha = 0.62f))
+            .border(0.5.dp, Color.White.copy(alpha = 0.08f), cardShape)
+            .clickable { onToggleLongPressAiChat(!prefs.longPressSwipeUpAiChatEnabled) }
+            .padding(horizontal = 14.dp, vertical = 12.dp)
+            .testTag("toggle_ai_settings_long_press_chat"),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(12.dp),
+    ) {
+        Icon(
+            imageVector = Icons.Rounded.TouchApp,
+            contentDescription = null,
+            tint = if (prefs.longPressSwipeUpAiChatEnabled) IceCyan else FrostSlate,
+            modifier = Modifier.size(20.dp),
+        )
+        Column(
+            modifier = Modifier.weight(1f),
+            verticalArrangement = Arrangement.spacedBy(2.dp),
+        ) {
+            Text(
+                text = "주소창 롱프레스 후 위로 스와이프 시 AI 대화 실행",
+                style = MaterialTheme.typography.bodyLarge,
+                color = PureFrost,
+            )
+            Text(
+                text = "주소창을 길게 눌러 진동 후 위로 스와이프하면 현재 URL과 함께 AI 대화창 열기",
+                style = MaterialTheme.typography.bodyMedium,
+                color = FrostSlate,
+            )
+        }
+        Switch(
+            checked = prefs.longPressSwipeUpAiChatEnabled,
+            onCheckedChange = onToggleLongPressAiChat,
+            colors = SwitchDefaults.colors(
+                checkedThumbColor = ObsidianVoid,
+                checkedTrackColor = IceCyan,
+                uncheckedThumbColor = FrostSlate,
+                uncheckedTrackColor = ObsidianVoid,
+            ),
+        )
+    }
 
     // 1. Active AI CLI selector list + "+ AI CLI 추가" button
     Row(
@@ -632,7 +697,10 @@ fun AiSettingsPage(
                         color = if (isSelected) IceCyan else Color.White.copy(alpha = 0.10f),
                         shape = cardShape,
                     )
-                    .clickable { onSelectAiProfile(profile.id) }
+                    .clickable {
+                        onSelectAiProfile(profile.id)
+                        onTestConnectionAndFetchModels(profile)
+                    }
                     .padding(horizontal = 14.dp, vertical = 12.dp)
                     .testTag("ai_profile_${profile.id}"),
                 verticalAlignment = Alignment.CenterVertically,
@@ -653,8 +721,9 @@ fun AiSettingsPage(
                         style = MaterialTheme.typography.titleMedium,
                         color = PureFrost,
                     )
+                    val modelLabel = profile.selectedModel.ifBlank { "모델 미선택 (연결 확인 필요)" }
                     Text(
-                        text = "모델: ${profile.selectedModel} · ${cliTypeDisplayName(profile.cliType)}",
+                        text = "모델: $modelLabel · ${cliTypeDisplayName(profile.cliType)}",
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis,
                         style = MaterialTheme.typography.labelSmall,
@@ -681,11 +750,13 @@ fun AiSettingsPage(
 
     Spacer(Modifier.height(4.dp))
 
-    // 2. Dynamic Per-AI Model Configuration keyed by activeProfile.id
+    // 2. Dynamic Per-AI Model & Connection Configuration keyed by activeProfile.id
     PerAiModelConfigSection(
         profile = activeProfile,
+        connectionStatus = connectionStatus?.takeIf { it.profileId == activeProfile.id },
         unifiedRadius = unifiedRadius,
         innerRadius = innerRadius,
+        onTestConnectionAndFetchModels = onTestConnectionAndFetchModels,
         onUpdateAiProfile = onUpdateAiProfile,
     )
 }
@@ -694,8 +765,10 @@ fun AiSettingsPage(
 @Composable
 private fun PerAiModelConfigSection(
     profile: AiCliProfile,
+    connectionStatus: AiConnectionStatus?,
     unifiedRadius: Dp,
     innerRadius: Dp,
+    onTestConnectionAndFetchModels: (AiCliProfile) -> Unit,
     onUpdateAiProfile: (
         profileId: String,
         name: String?,
@@ -746,84 +819,6 @@ private fun PerAiModelConfigSection(
                 style = MaterialTheme.typography.titleMedium,
                 color = PureFrost,
             )
-        }
-
-        // Model selection chips
-        Text(
-            text = "사용할 모델 선택",
-            style = MaterialTheme.typography.labelMedium,
-            color = FrostSlate,
-        )
-        FlowRow(
-            horizontalArrangement = Arrangement.spacedBy(8.dp),
-            verticalArrangement = Arrangement.spacedBy(8.dp),
-        ) {
-            profile.availableModels.forEach { modelName ->
-                val selected = modelName == profile.selectedModel
-                val chipShape = RoundedCornerShape(innerRadius)
-                Row(
-                    modifier = Modifier
-                        .clip(chipShape)
-                        .background(
-                            if (selected) IceCyan.copy(alpha = 0.22f)
-                            else ObsidianVoid.copy(alpha = 0.65f)
-                        )
-                        .border(
-                            width = 0.75.dp,
-                            color = if (selected) IceCyan else Color.White.copy(alpha = 0.12f),
-                            shape = chipShape,
-                        )
-                        .clickable {
-                            onUpdateAiProfile(profile.id, null, null, null, modelName, null, null, null)
-                            savedBanner = "모델이 '$modelName'(으)로 변경되었습니다."
-                        }
-                        .padding(horizontal = 12.dp, vertical = 8.dp)
-                        .testTag("ai_model_chip_$modelName"),
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    Text(
-                        text = modelName,
-                        style = MaterialTheme.typography.labelMedium,
-                        color = if (selected) PureFrost else FrostSlate,
-                    )
-                }
-            }
-        }
-
-        // Custom model input
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(8.dp),
-        ) {
-            OutlinedTextField(
-                value = customModelDraft,
-                onValueChange = { customModelDraft = it },
-                singleLine = true,
-                shape = RoundedCornerShape(innerRadius),
-                label = {
-                    Text("직접 모델명 추가", style = MaterialTheme.typography.labelSmall)
-                },
-                textStyle = MaterialTheme.typography.bodyMedium.copy(color = PureFrost),
-                colors = aiOutlinedFieldColors(),
-                modifier = Modifier
-                    .weight(1f)
-                    .testTag("ai_custom_model_input"),
-            )
-            OutlinedButton(
-                onClick = {
-                    val trimmed = customModelDraft.trim()
-                    if (trimmed.isNotEmpty()) {
-                        onUpdateAiProfile(profile.id, null, null, null, null, trimmed, null, null)
-                        customModelDraft = ""
-                        savedBanner = "모델 '$trimmed'이(가) 추가 및 선택되었습니다."
-                    }
-                },
-                shape = RoundedCornerShape(innerRadius),
-                modifier = Modifier.testTag("ai_add_custom_model_button"),
-            ) {
-                Text("적용", style = MaterialTheme.typography.labelMedium, color = IceCyan)
-            }
         }
 
         // Masked API Key / Token input
@@ -878,13 +873,71 @@ private fun PerAiModelConfigSection(
             )
             OutlinedButton(
                 onClick = {
-                    onUpdateAiProfile(profile.id, null, null, apiKeyDraft.trim(), null, null, null, null)
-                    savedBanner = "API 키가 안전하게 저장되었습니다."
+                    val cleanKey = apiKeyDraft.trim()
+                    val cleanEndpoint = endpointDraft.trim()
+                    onUpdateAiProfile(profile.id, null, cleanEndpoint, cleanKey, null, null, null, null)
+                    savedBanner = "API 키 저장됨 — 연결 및 모델을 확인합니다."
+                    onTestConnectionAndFetchModels(
+                        profile.copy(apiKey = cleanKey, endpointOrCommand = cleanEndpoint)
+                    )
                 },
                 shape = RoundedCornerShape(innerRadius),
                 modifier = Modifier.testTag("ai_save_key_button"),
             ) {
                 Text("저장", style = MaterialTheme.typography.labelMedium, color = IceCyan)
+            }
+        }
+
+        // Kimi CLI Endpoint Region Quick Chips (.ai / .cn)
+        if (profile.cliType == AiCliProfile.CLI_TYPE_KIMI) {
+            Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                Text(
+                    text = "Kimi (Moonshot AI) 엔드포인트 빠른 선택",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = FrostSlate,
+                )
+                FlowRow(
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    listOf(
+                        BrowserPreferences.KIMI_GLOBAL_ENDPOINT to "글로벌 (.ai)",
+                        BrowserPreferences.KIMI_CHINA_ENDPOINT to "중국 (.cn)",
+                    ).forEach { (url, label) ->
+                        val activeChip = endpointDraft.trim().equals(url, ignoreCase = true)
+                        val chipShape = RoundedCornerShape(innerRadius)
+                        Box(
+                            modifier = Modifier
+                                .clip(chipShape)
+                                .background(
+                                    if (activeChip) IceCyan.copy(alpha = 0.22f)
+                                    else ObsidianVoid.copy(alpha = 0.65f)
+                                )
+                                .border(
+                                    width = 0.75.dp,
+                                    color = if (activeChip) IceCyan else Color.White.copy(alpha = 0.12f),
+                                    shape = chipShape,
+                                )
+                                .clickable {
+                                    endpointDraft = url
+                                    val cleanKey = apiKeyDraft.trim()
+                                    onUpdateAiProfile(profile.id, null, url, cleanKey, null, null, null, null)
+                                    savedBanner = "Kimi 엔드포인트가 '$label'로 변경되었습니다."
+                                    onTestConnectionAndFetchModels(
+                                        profile.copy(endpointOrCommand = url, apiKey = cleanKey)
+                                    )
+                                }
+                                .padding(horizontal = 12.dp, vertical = 7.dp)
+                                .testTag("kimi_endpoint_chip_${label}"),
+                        ) {
+                            Text(
+                                text = "$label · $url",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = if (activeChip) PureFrost else FrostSlate,
+                            )
+                        }
+                    }
+                }
             }
         }
 
@@ -925,13 +978,188 @@ private fun PerAiModelConfigSection(
             )
             OutlinedButton(
                 onClick = {
-                    onUpdateAiProfile(profile.id, null, endpointDraft.trim(), null, null, null, null, null)
-                    savedBanner = "엔드포인트 주소가 저장되었습니다."
+                    val cleanEndpoint = endpointDraft.trim()
+                    val cleanKey = apiKeyDraft.trim()
+                    onUpdateAiProfile(profile.id, null, cleanEndpoint, cleanKey, null, null, null, null)
+                    savedBanner = "엔드포인트 저장됨 — 연결 및 모델을 확인합니다."
+                    onTestConnectionAndFetchModels(
+                        profile.copy(endpointOrCommand = cleanEndpoint, apiKey = cleanKey)
+                    )
                 },
                 shape = RoundedCornerShape(innerRadius),
                 modifier = Modifier.testTag("ai_save_endpoint_button"),
             ) {
                 Text("저장", style = MaterialTheme.typography.labelMedium, color = IceCyan)
+            }
+        }
+
+        // Connection Verification & Dynamic Model Fetch Button + Live Status
+        Button(
+            onClick = {
+                val cleanEndpoint = endpointDraft.trim()
+                val cleanKey = apiKeyDraft.trim()
+                onUpdateAiProfile(profile.id, null, cleanEndpoint, cleanKey, null, null, null, null)
+                onTestConnectionAndFetchModels(
+                    profile.copy(endpointOrCommand = cleanEndpoint, apiKey = cleanKey)
+                )
+            },
+            enabled = connectionStatus?.isChecking != true,
+            shape = RoundedCornerShape(innerRadius),
+            colors = ButtonDefaults.buttonColors(
+                containerColor = IceCyan.copy(alpha = 0.20f),
+                contentColor = IceCyan,
+            ),
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(46.dp)
+                .border(0.75.dp, IceCyan.copy(alpha = 0.55f), RoundedCornerShape(innerRadius))
+                .testTag("ai_fetch_models_button"),
+        ) {
+            if (connectionStatus?.isChecking == true) {
+                CircularProgressIndicator(
+                    color = IceCyan,
+                    strokeWidth = 2.dp,
+                    modifier = Modifier.size(16.dp),
+                )
+                Spacer(Modifier.width(8.dp))
+                Text("연결 확인 및 모델 불러오는 중...", style = MaterialTheme.typography.labelMedium)
+            } else {
+                Icon(
+                    imageVector = Icons.Rounded.CloudSync,
+                    contentDescription = null,
+                    modifier = Modifier.size(18.dp),
+                )
+                Spacer(Modifier.width(8.dp))
+                Text("연결 확인 및 모델 불러오기", style = MaterialTheme.typography.labelMedium)
+            }
+        }
+
+        if (connectionStatus != null && connectionStatus.statusMessage.isNotBlank()) {
+            val statusColor = when {
+                connectionStatus.isChecking -> IceCyan
+                connectionStatus.isConnected -> EmeraldSecure
+                connectionStatus.isError -> AmberWarn
+                else -> FrostSlate
+            }
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(innerRadius))
+                    .background(statusColor.copy(alpha = 0.12f))
+                    .border(0.5.dp, statusColor.copy(alpha = 0.45f), RoundedCornerShape(innerRadius))
+                    .padding(horizontal = 12.dp, vertical = 9.dp)
+                    .testTag("ai_connection_status_banner"),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                Box(
+                    modifier = Modifier
+                        .size(8.dp)
+                        .clip(CircleShape)
+                        .background(statusColor),
+                )
+                Text(
+                    text = connectionStatus.statusMessage,
+                    style = MaterialTheme.typography.labelMedium,
+                    color = statusColor,
+                    modifier = Modifier.weight(1f),
+                )
+            }
+        }
+
+        // Dynamic Model Selection Chips
+        Text(
+            text = "사용할 모델 선택 (${profile.availableModels.size}개)",
+            style = MaterialTheme.typography.labelMedium,
+            color = FrostSlate,
+        )
+        if (profile.availableModels.isEmpty()) {
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(innerRadius))
+                    .background(ObsidianVoid.copy(alpha = 0.55f))
+                    .border(0.5.dp, Color.White.copy(alpha = 0.08f), RoundedCornerShape(innerRadius))
+                    .padding(12.dp)
+                    .testTag("ai_models_empty_hint"),
+            ) {
+                Text(
+                    text = "불러온 모델 목록이 없습니다. 상단에서 API 키 또는 로컬 주소를 저장하고 '연결 확인 및 모델 불러오기'를 누르거나 아래에 직접 모델명을 입력하세요.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = FrostSlate,
+                )
+            }
+        } else {
+            FlowRow(
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                profile.availableModels.forEach { modelName ->
+                    val selected = modelName == profile.selectedModel
+                    val chipShape = RoundedCornerShape(innerRadius)
+                    Row(
+                        modifier = Modifier
+                            .clip(chipShape)
+                            .background(
+                                if (selected) IceCyan.copy(alpha = 0.22f)
+                                else ObsidianVoid.copy(alpha = 0.65f)
+                            )
+                            .border(
+                                width = 0.75.dp,
+                                color = if (selected) IceCyan else Color.White.copy(alpha = 0.12f),
+                                shape = chipShape,
+                            )
+                            .clickable {
+                                onUpdateAiProfile(profile.id, null, null, null, modelName, null, null, null)
+                                savedBanner = "모델이 '$modelName'(으)로 변경되었습니다."
+                            }
+                            .padding(horizontal = 12.dp, vertical = 8.dp)
+                            .testTag("ai_model_chip_$modelName"),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Text(
+                            text = modelName,
+                            style = MaterialTheme.typography.labelMedium,
+                            color = if (selected) PureFrost else FrostSlate,
+                        )
+                    }
+                }
+            }
+        }
+
+        // Custom model input (fallback / manual override)
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            OutlinedTextField(
+                value = customModelDraft,
+                onValueChange = { customModelDraft = it },
+                singleLine = true,
+                shape = RoundedCornerShape(innerRadius),
+                label = {
+                    Text("직접 모델명 추가", style = MaterialTheme.typography.labelSmall)
+                },
+                textStyle = MaterialTheme.typography.bodyMedium.copy(color = PureFrost),
+                colors = aiOutlinedFieldColors(),
+                modifier = Modifier
+                    .weight(1f)
+                    .testTag("ai_custom_model_input"),
+            )
+            OutlinedButton(
+                onClick = {
+                    val trimmed = customModelDraft.trim()
+                    if (trimmed.isNotEmpty()) {
+                        onUpdateAiProfile(profile.id, null, null, null, null, trimmed, null, null)
+                        customModelDraft = ""
+                        savedBanner = "모델 '$trimmed'이(가) 추가 및 선택되었습니다."
+                    }
+                },
+                shape = RoundedCornerShape(innerRadius),
+                modifier = Modifier.testTag("ai_add_custom_model_button"),
+            ) {
+                Text("적용", style = MaterialTheme.typography.labelMedium, color = IceCyan)
             }
         }
 
@@ -1030,8 +1258,8 @@ private fun AddCustomAiCliCard(
     val cardShape = RoundedCornerShape(unifiedRadius)
     var name by remember { mutableStateOf("") }
     var cliType by remember { mutableStateOf(AiCliProfile.CLI_TYPE_CUSTOM) }
-    var endpoint by remember { mutableStateOf("http://127.0.0.1:8080/v1/chat/completions") }
-    var model by remember { mutableStateOf("custom-model") }
+    var endpoint by remember { mutableStateOf("http://127.0.0.1:8080/v1") }
+    var model by remember { mutableStateOf("") }
     var apiKey by remember { mutableStateOf("") }
     var temperature by remember { mutableFloatStateOf(0.4f) }
 
@@ -1057,6 +1285,7 @@ private fun AddCustomAiCliCard(
         ) {
             listOf(
                 AiCliProfile.CLI_TYPE_CUSTOM to "OpenAI 호환 / 브릿지",
+                AiCliProfile.CLI_TYPE_KIMI to "Kimi (Moonshot)",
                 AiCliProfile.CLI_TYPE_GEMINI to "Gemini",
                 AiCliProfile.CLI_TYPE_CLAUDE to "Claude",
                 AiCliProfile.CLI_TYPE_OLLAMA to "Ollama",
@@ -1115,7 +1344,7 @@ private fun AddCustomAiCliCard(
             onValueChange = { model = it },
             singleLine = true,
             shape = RoundedCornerShape(innerRadius),
-            label = { Text("기본 모델명", style = MaterialTheme.typography.labelSmall) },
+            label = { Text("기본 모델명 (비워두면 연결 후 자동 조회)", style = MaterialTheme.typography.labelSmall) },
             textStyle = MaterialTheme.typography.bodyMedium.copy(color = PureFrost),
             colors = aiOutlinedFieldColors(),
             modifier = Modifier
@@ -1155,7 +1384,7 @@ private fun AddCustomAiCliCard(
                         cliType,
                         endpoint,
                         apiKey,
-                        model.ifBlank { "custom-model" },
+                        model.trim(),
                         temperature,
                     )
                 },
@@ -1188,6 +1417,7 @@ private fun cliTypeDisplayName(cliType: String): String =
         AiCliProfile.CLI_TYPE_GEMINI -> "Gemini API"
         AiCliProfile.CLI_TYPE_CLAUDE -> "Claude API"
         AiCliProfile.CLI_TYPE_OPENAI -> "OpenAI / Codex"
+        AiCliProfile.CLI_TYPE_KIMI -> "Kimi (Moonshot AI)"
         AiCliProfile.CLI_TYPE_OLLAMA -> "Ollama 로컬"
         else -> "사용자 지정 REST"
     }

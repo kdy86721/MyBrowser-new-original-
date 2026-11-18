@@ -1,5 +1,10 @@
 package com.example.ui.components
 
+import android.content.Context
+import android.os.Build
+import android.os.VibrationEffect
+import android.os.Vibrator
+import android.os.VibratorManager
 import androidx.activity.compose.BackHandler
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.AnimatedVisibility
@@ -25,6 +30,9 @@ import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
@@ -94,6 +102,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -110,8 +119,15 @@ import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.TransformOrigin
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.hapticfeedback.HapticFeedback
+import androidx.compose.ui.hapticfeedback.HapticFeedbackType
+import androidx.compose.ui.input.pointer.PointerEventPass
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.input.pointer.positionChange
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalFocusManager
+import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.TextRange
@@ -133,9 +149,6 @@ import com.example.core.SecurityState
 import com.example.core.ToggleIndicatorStyle
 import com.example.core.ToolbarAction
 import com.example.core.ToolbarConfig
-import androidx.compose.foundation.gestures.detectDragGestures
-import androidx.compose.foundation.gestures.detectTapGestures
-import androidx.compose.ui.input.pointer.pointerInput
 import com.example.ui.theme.AmberWarn
 import com.example.ui.theme.EmeraldSecure
 import com.example.ui.theme.FrostSlate
@@ -147,11 +160,13 @@ import com.example.ui.theme.PerimeterLoadingRing
 import com.example.ui.theme.PlusJakartaSansFontFamily
 import com.example.ui.theme.PureFrost
 import com.example.ui.theme.unifiedInnerRadius
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.android.awaitFrame
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlin.math.abs
+import kotlin.math.hypot
 
 @Immutable
 data class FoldablePostureUiState(
@@ -213,6 +228,7 @@ fun FloatingControlBar(
     onAddressSwipeDown: () -> Unit,
     onAddressSwipeTab: (delta: Int) -> Unit,
     onAddressDoubleTap: () -> Unit,
+    onLongPressSwipeUpAiChat: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
     val activeTab = snapshot.activeTab
@@ -419,6 +435,7 @@ fun FloatingControlBar(
                             swipeDownAction = prefs.swipeDownAction,
                             swipeLeftRightTabSwitch = prefs.swipeLeftRightTabSwitch,
                             doubleTapAction = prefs.doubleTapAction,
+                            longPressSwipeUpAiChatEnabled = prefs.longPressSwipeUpAiChatEnabled,
                             gestureSensitivityDp = prefs.gestureSensitivityDp,
                             onTapToEdit = onEnterAddressEdit,
                             onExitEdit = onExitAddressEdit,
@@ -428,6 +445,7 @@ fun FloatingControlBar(
                             onSwipeDown = onAddressSwipeDown,
                             onSwipeTab = onAddressSwipeTab,
                             onDoubleTap = onAddressDoubleTap,
+                            onLongPressSwipeUpAiChat = onLongPressSwipeUpAiChat,
                             modifier = Modifier
                                 .weight(1f)
                                 .padding(horizontal = if (effectiveCollapsed) 2.dp else 4.dp),
@@ -583,20 +601,20 @@ fun QuickToggleDropdownMenu(
                     visible = visible,
                     enter = expandVertically(
                         expandFrom = Alignment.Bottom,
-                        animationSpec = tween(durationMillis = 240, easing = FastOutSlowInEasing),
+                        animationSpec = tween(durationMillis = 220, easing = FastOutSlowInEasing),
                     ) + scaleIn(
-                        initialScale = 0.85f,
+                        initialScale = 0.88f,
                         transformOrigin = TransformOrigin(1f, 1f),
-                        animationSpec = tween(durationMillis = 240, easing = FastOutSlowInEasing),
-                    ) + fadeIn(animationSpec = tween(durationMillis = 180)),
+                        animationSpec = tween(durationMillis = 220, easing = FastOutSlowInEasing),
+                    ) + fadeIn(animationSpec = tween(durationMillis = 160)),
                     exit = shrinkVertically(
                         shrinkTowards = Alignment.Bottom,
-                        animationSpec = tween(durationMillis = 220, easing = FastOutSlowInEasing),
+                        animationSpec = tween(durationMillis = 190, easing = FastOutSlowInEasing),
                     ) + scaleOut(
-                        targetScale = 0.85f,
+                        targetScale = 0.88f,
                         transformOrigin = TransformOrigin(1f, 1f),
-                        animationSpec = tween(durationMillis = 220, easing = FastOutSlowInEasing),
-                    ) + fadeOut(animationSpec = tween(durationMillis = 160)),
+                        animationSpec = tween(durationMillis = 190, easing = FastOutSlowInEasing),
+                    ) + fadeOut(animationSpec = tween(durationMillis = 140)),
                 ) {
                     LiquidGlassSurface(
                         modifier = Modifier.fillMaxWidth(),
@@ -604,132 +622,136 @@ fun QuickToggleDropdownMenu(
                         shadowElevation = 24.dp,
                         glassOpacity = (prefs.glassOpacity + 0.07f).coerceAtMost(0.45f),
                     ) {
-                    Column(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(8.dp),
-                        verticalArrangement = Arrangement.spacedBy(6.dp),
-                    ) {
-                        val toggles = prefs.customQuickToggles
-                        val listModifier = Modifier
-                            .fillMaxWidth()
-                            .heightIn(max = prefs.dropdownMaxHeightDp.dp)
-                            .verticalScroll(rememberScrollState())
+                        Column(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(8.dp),
+                            verticalArrangement = Arrangement.spacedBy(6.dp),
+                        ) {
+                            val toggles = prefs.customQuickToggles
+                            val totalStaggerItems = toggles.size + 1
+                            val listModifier = Modifier
+                                .fillMaxWidth()
+                                .heightIn(max = prefs.dropdownMaxHeightDp.dp)
+                                .verticalScroll(rememberScrollState())
 
-                        if (isTwoColumn) {
-                            Column(
-                                modifier = listModifier,
-                                verticalArrangement = Arrangement.spacedBy(6.dp),
-                            ) {
-                                val rows = toggles.chunked(2)
-                                rows.forEachIndexed { rowIdx, pair ->
-                                    Row(
-                                        modifier = Modifier.fillMaxWidth(),
-                                        horizontalArrangement = Arrangement.spacedBy(6.dp),
-                                    ) {
-                                        pair.forEachIndexed { colIdx, toggle ->
-                                            val itemIndex = rowIdx * 2 + colIdx
-                                            val isActive = isQuickToggleActive(
-                                                toggle = toggle,
-                                                snapshot = snapshot,
-                                                isCurrentUrlBookmarked = isCurrentUrlBookmarked,
-                                            )
-                                            StaggeredEntranceItem(
-                                                visible = visible,
-                                                index = itemIndex,
-                                                modifier = Modifier.weight(1f),
-                                            ) {
-                                                QuickToggleTileItem(
+                            if (isTwoColumn) {
+                                Column(
+                                    modifier = listModifier,
+                                    verticalArrangement = Arrangement.spacedBy(6.dp),
+                                ) {
+                                    val rows = toggles.chunked(2)
+                                    rows.forEachIndexed { rowIdx, pair ->
+                                        Row(
+                                            modifier = Modifier.fillMaxWidth(),
+                                            horizontalArrangement = Arrangement.spacedBy(6.dp),
+                                        ) {
+                                            pair.forEachIndexed { colIdx, toggle ->
+                                                val itemIndex = rowIdx * 2 + colIdx
+                                                val isActive = isQuickToggleActive(
                                                     toggle = toggle,
-                                                    isActive = isActive,
-                                                    indicatorStyle = prefs.toggleIndicatorStyle,
-                                                    innerRadius = innerRadius,
-                                                    onClick = { onQuickToggle(toggle) },
+                                                    snapshot = snapshot,
+                                                    isCurrentUrlBookmarked = isCurrentUrlBookmarked,
                                                 )
+                                                StaggeredEntranceItem(
+                                                    visible = visible,
+                                                    index = itemIndex,
+                                                    totalItems = totalStaggerItems,
+                                                    modifier = Modifier.weight(1f),
+                                                ) {
+                                                    QuickToggleTileItem(
+                                                        toggle = toggle,
+                                                        isActive = isActive,
+                                                        indicatorStyle = prefs.toggleIndicatorStyle,
+                                                        innerRadius = innerRadius,
+                                                        onClick = { onQuickToggle(toggle) },
+                                                    )
+                                                }
+                                            }
+                                            if (pair.size == 1) {
+                                                Spacer(Modifier.weight(1f))
                                             }
                                         }
-                                        if (pair.size == 1) {
-                                            Spacer(Modifier.weight(1f))
+                                    }
+                                }
+                            } else {
+                                Column(
+                                    modifier = listModifier,
+                                    verticalArrangement = Arrangement.spacedBy(4.dp),
+                                ) {
+                                    toggles.forEachIndexed { index, toggle ->
+                                        val isActive = isQuickToggleActive(
+                                            toggle = toggle,
+                                            snapshot = snapshot,
+                                            isCurrentUrlBookmarked = isCurrentUrlBookmarked,
+                                        )
+                                        StaggeredEntranceItem(
+                                            visible = visible,
+                                            index = index,
+                                            totalItems = totalStaggerItems,
+                                        ) {
+                                            QuickToggleRowItem(
+                                                toggle = toggle,
+                                                isActive = isActive,
+                                                indicatorStyle = prefs.toggleIndicatorStyle,
+                                                innerRadius = innerRadius,
+                                                onClick = { onQuickToggle(toggle) },
+                                            )
                                         }
                                     }
                                 }
                             }
-                        } else {
-                            Column(
-                                modifier = listModifier,
-                                verticalArrangement = Arrangement.spacedBy(4.dp),
+
+                            HorizontalDivider(
+                                color = Color.White.copy(alpha = 0.14f),
+                                modifier = Modifier.padding(vertical = 1.dp),
+                            )
+
+                            // Bottom "설정" item gets reverseIndex = 0 so it appears first right above the gear
+                            StaggeredEntranceItem(
+                                visible = visible,
+                                index = toggles.size,
+                                totalItems = totalStaggerItems,
                             ) {
-                                toggles.forEachIndexed { index, toggle ->
-                                    val isActive = isQuickToggleActive(
-                                        toggle = toggle,
-                                        snapshot = snapshot,
-                                        isCurrentUrlBookmarked = isCurrentUrlBookmarked,
+                                val settingsShape = RoundedCornerShape(innerRadius)
+                                Row(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .clip(settingsShape)
+                                        .background(Color.White.copy(alpha = 0.08f))
+                                        .border(0.5.dp, Color.White.copy(alpha = 0.16f), settingsShape)
+                                        .clickable(onClick = onOpenFullSettings)
+                                        .padding(horizontal = 12.dp, vertical = 11.dp)
+                                        .testTag("quick_menu_settings_button"),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(10.dp),
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Rounded.Settings,
+                                        contentDescription = null,
+                                        tint = IceCyan,
+                                        modifier = Modifier.size(18.dp),
                                     )
-                                    StaggeredEntranceItem(
-                                        visible = visible,
-                                        index = index,
-                                    ) {
-                                        QuickToggleRowItem(
-                                            toggle = toggle,
-                                            isActive = isActive,
-                                            indicatorStyle = prefs.toggleIndicatorStyle,
-                                            innerRadius = innerRadius,
-                                            onClick = { onQuickToggle(toggle) },
-                                        )
-                                    }
+                                    Text(
+                                        text = "설정",
+                                        style = TextStyle(
+                                            color = PureFrost,
+                                            fontFamily = PlusJakartaSansFontFamily,
+                                            fontWeight = FontWeight.SemiBold,
+                                            fontSize = 13.5.sp,
+                                        ),
+                                        modifier = Modifier.weight(1f),
+                                    )
+                                    Icon(
+                                        imageVector = Icons.AutoMirrored.Rounded.KeyboardArrowRight,
+                                        contentDescription = null,
+                                        tint = FrostSlate,
+                                        modifier = Modifier.size(18.dp),
+                                    )
                                 }
-                            }
-                        }
-
-                        HorizontalDivider(
-                            color = Color.White.copy(alpha = 0.14f),
-                            modifier = Modifier.padding(vertical = 1.dp),
-                        )
-
-                        // Bottom "설정" item participating in the staggered sequential entrance animation
-                        StaggeredEntranceItem(
-                            visible = visible,
-                            index = toggles.size.coerceAtMost(12),
-                        ) {
-                            val settingsShape = RoundedCornerShape(innerRadius)
-                            Row(
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .clip(settingsShape)
-                                    .background(Color.White.copy(alpha = 0.08f))
-                                    .border(0.5.dp, Color.White.copy(alpha = 0.16f), settingsShape)
-                                    .clickable(onClick = onOpenFullSettings)
-                                    .padding(horizontal = 12.dp, vertical = 11.dp)
-                                    .testTag("quick_menu_settings_button"),
-                                verticalAlignment = Alignment.CenterVertically,
-                                horizontalArrangement = Arrangement.spacedBy(10.dp),
-                            ) {
-                                Icon(
-                                    imageVector = Icons.Rounded.Settings,
-                                    contentDescription = null,
-                                    tint = IceCyan,
-                                    modifier = Modifier.size(18.dp),
-                                )
-                                Text(
-                                    text = "설정",
-                                    style = TextStyle(
-                                        color = PureFrost,
-                                        fontFamily = PlusJakartaSansFontFamily,
-                                        fontWeight = FontWeight.SemiBold,
-                                        fontSize = 13.5.sp,
-                                    ),
-                                    modifier = Modifier.weight(1f),
-                                )
-                                Icon(
-                                    imageVector = Icons.AutoMirrored.Rounded.KeyboardArrowRight,
-                                    contentDescription = null,
-                                    tint = FrostSlate,
-                                    modifier = Modifier.size(18.dp),
-                                )
                             }
                         }
                     }
-                }
                 }
             }
         }
@@ -740,28 +762,30 @@ fun QuickToggleDropdownMenu(
 private fun StaggeredEntranceItem(
     visible: Boolean,
     index: Int,
+    totalItems: Int,
     modifier: Modifier = Modifier,
     content: @Composable () -> Unit,
 ) {
     val alphaAnim = remember { Animatable(0f) }
-    val translationYDp = remember { Animatable(14f) }
+    val translationYDp = remember { Animatable(20f) }
+    val reverseIndex = (totalItems - 1 - index).coerceAtLeast(0)
 
-    LaunchedEffect(visible, index) {
+    LaunchedEffect(visible, index, totalItems) {
         if (visible) {
             alphaAnim.snapTo(0f)
-            translationYDp.snapTo(14f)
-            delay(index * 28L)
+            translationYDp.snapTo(20f)
+            delay(reverseIndex * 26L)
             coroutineScope {
                 launch {
                     alphaAnim.animateTo(
                         targetValue = 1f,
-                        animationSpec = tween(durationMillis = 200, easing = FastOutSlowInEasing),
+                        animationSpec = tween(durationMillis = 190, easing = FastOutSlowInEasing),
                     )
                 }
                 launch {
                     translationYDp.animateTo(
                         targetValue = 0f,
-                        animationSpec = spring(dampingRatio = 0.82f, stiffness = 440f),
+                        animationSpec = spring(dampingRatio = 0.82f, stiffness = 460f),
                     )
                 }
             }
@@ -1142,6 +1166,7 @@ private fun AddressCapsule(
     swipeDownAction: Int,
     swipeLeftRightTabSwitch: Boolean,
     doubleTapAction: Int,
+    longPressSwipeUpAiChatEnabled: Boolean,
     gestureSensitivityDp: Float,
     onTapToEdit: () -> Unit,
     onExitEdit: () -> Unit,
@@ -1151,6 +1176,7 @@ private fun AddressCapsule(
     onSwipeDown: () -> Unit,
     onSwipeTab: (delta: Int) -> Unit,
     onDoubleTap: () -> Unit,
+    onLongPressSwipeUpAiChat: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
     val currentUrl = activeTab?.url.orEmpty()
@@ -1158,21 +1184,50 @@ private fun AddressCapsule(
     val isLoading = activeTab?.isLoading == true
     val isIncognito = activeTab?.isIncognito == true
 
+    val context = LocalContext.current
+    val hapticFeedback = LocalHapticFeedback.current
+    val gestureScope = rememberCoroutineScope()
     val density = LocalDensity.current
     val sensitivityPx = with(density) { gestureSensitivityDp.dp.toPx() }
     val maxVisualDragPx = with(density) { 28.dp.toPx() }
+    val maxArmedLiftPx = with(density) { 44.dp.toPx() }
+    val reloadGuardPx = with(density) { 40.dp.toPx() }
 
     val latestOnTapToEdit by rememberUpdatedState(onTapToEdit)
     val latestOnSwipeUp by rememberUpdatedState(onSwipeUp)
     val latestOnSwipeDown by rememberUpdatedState(onSwipeDown)
     val latestOnSwipeTab by rememberUpdatedState(onSwipeTab)
     val latestOnDoubleTap by rememberUpdatedState(onDoubleTap)
+    val latestOnLongPressSwipeUpAiChat by rememberUpdatedState(onLongPressSwipeUpAiChat)
 
+    var isLongPressArmed by remember(isEditing) { mutableStateOf(false) }
     var targetVisualDragX by remember(isEditing) { mutableFloatStateOf(0f) }
+    var targetVisualDragY by remember(isEditing) { mutableFloatStateOf(0f) }
+
     val animatedDragX by animateFloatAsState(
         targetValue = if (isEditing) 0f else targetVisualDragX,
         animationSpec = spring(dampingRatio = 0.78f, stiffness = 440f),
-        label = "address_capsule_drag_offset",
+        label = "address_capsule_drag_offset_x",
+    )
+    val animatedDragY by animateFloatAsState(
+        targetValue = if (isEditing) 0f else targetVisualDragY,
+        animationSpec = spring(dampingRatio = 0.78f, stiffness = 460f),
+        label = "address_capsule_drag_offset_y",
+    )
+    val armedScale by animateFloatAsState(
+        targetValue = if (!isEditing && isLongPressArmed) 1.025f else 1f,
+        animationSpec = spring(dampingRatio = 0.72f, stiffness = 460f),
+        label = "address_capsule_armed_scale",
+    )
+    val targetStretch = if (!isEditing && isLongPressArmed && targetVisualDragY < 0f) {
+        (-targetVisualDragY / maxArmedLiftPx).coerceIn(0f, 1f)
+    } else {
+        0f
+    }
+    val animatedStretch by animateFloatAsState(
+        targetValue = targetStretch,
+        animationSpec = spring(dampingRatio = 0.78f, stiffness = 440f),
+        label = "address_capsule_armed_stretch",
     )
 
     val focusRequester = remember { FocusRequester() }
@@ -1223,87 +1278,213 @@ private fun AddressCapsule(
             Color.White.copy(alpha = 0.03f),
         )
     )
-    val capsuleRimBrush = if (isEditing) {
-        Brush.verticalGradient(
+    val capsuleRimBrush = when {
+        isLongPressArmed && !isEditing -> Brush.verticalGradient(
+            listOf(IceCyan, Color(0xFF9E7BFF))
+        )
+        isEditing -> Brush.verticalGradient(
             listOf(IceCyan.copy(alpha = 0.85f), IceCyan.copy(alpha = 0.35f))
         )
-    } else {
-        Brush.verticalGradient(
+        else -> Brush.verticalGradient(
             listOf(Color.White.copy(alpha = 0.34f), Color.White.copy(alpha = 0.10f))
         )
     }
+    val rimWidth = if (isLongPressArmed && !isEditing) 1.25.dp else 0.5.dp
 
     Box(
         modifier = modifier
             .graphicsLayer {
+                transformOrigin = TransformOrigin(0.5f, 1f)
                 translationX = animatedDragX
+                translationY = animatedDragY
+                scaleX = armedScale + animatedStretch * 0.03f
+                scaleY = armedScale + animatedStretch * 0.14f
             }
             .height(capsuleHeight)
             .defaultMinSize(minWidth = 48.dp, minHeight = 44.dp)
             .clip(capsuleShape)
             .background(capsuleBaseTint)
             .background(capsuleSpecular)
-            .border(width = 0.5.dp, brush = capsuleRimBrush, shape = capsuleShape)
+            .then(
+                if (isLongPressArmed && !isEditing) {
+                    Modifier.background(
+                        Brush.horizontalGradient(
+                            listOf(
+                                IceCyan.copy(alpha = 0.16f),
+                                Color(0xFF9E7BFF).copy(alpha = 0.14f),
+                            )
+                        )
+                    )
+                } else {
+                    Modifier
+                }
+            )
+            .border(width = rimWidth, brush = capsuleRimBrush, shape = capsuleShape)
             .then(
                 if (!isEditing) {
+                    var pendingSingleTapJob: Job? = null
                     Modifier
-                        .pointerInput(gesturesEnabled, doubleTapAction) {
-                            detectTapGestures(
-                                onTap = { latestOnTapToEdit() },
-                                onDoubleTap = if (gesturesEnabled && doubleTapAction != BrowserPreferences.GESTURE_NONE) {
-                                    { latestOnDoubleTap() }
-                                } else {
-                                    null
-                                },
-                            )
-                        }
                         .pointerInput(
                             gesturesEnabled,
                             swipeUpAction,
                             swipeDownAction,
                             swipeLeftRightTabSwitch,
+                            doubleTapAction,
+                            longPressSwipeUpAiChatEnabled,
                             sensitivityPx,
                         ) {
-                            if (!gesturesEnabled) return@pointerInput
-                            var dragX = 0f
-                            var dragY = 0f
-                            detectDragGestures(
-                                onDragStart = {
-                                    dragX = 0f
-                                    dragY = 0f
-                                    targetVisualDragX = 0f
-                                },
-                                onDrag = { change, dragAmount ->
-                                    change.consume()
-                                    dragX += dragAmount.x
-                                    dragY += dragAmount.y
-                                    if (swipeLeftRightTabSwitch && abs(dragX) > abs(dragY)) {
-                                        targetVisualDragX = (dragX * 0.42f)
-                                            .coerceIn(-maxVisualDragPx, maxVisualDragPx)
-                                    } else {
-                                        targetVisualDragX = 0f
-                                    }
-                                },
-                                onDragEnd = {
-                                    if (abs(dragY) >= abs(dragX)) {
-                                        if (dragY < -sensitivityPx && swipeUpAction != BrowserPreferences.GESTURE_NONE) {
-                                            latestOnSwipeUp()
-                                        } else if (dragY > sensitivityPx && swipeDownAction != BrowserPreferences.GESTURE_NONE) {
-                                            latestOnSwipeDown()
+                            awaitEachGesture {
+                                val down = awaitFirstDown(requireUnconsumed = false)
+                                if (down.position.x >= size.width - reloadGuardPx) {
+                                    return@awaitEachGesture
+                                }
+
+                                val isDoubleTapCandidate =
+                                    gesturesEnabled &&
+                                        doubleTapAction != BrowserPreferences.GESTURE_NONE &&
+                                        pendingSingleTapJob?.isActive == true
+                                if (isDoubleTapCandidate) {
+                                    pendingSingleTapJob?.cancel()
+                                    pendingSingleTapJob = null
+                                }
+
+                                val touchSlop = viewConfiguration.touchSlop
+                                val longPressTimeoutMs = viewConfiguration.longPressTimeoutMillis
+                                val doubleTapTimeoutMs = viewConfiguration.doubleTapTimeoutMillis
+                                val startNanos = System.nanoTime()
+
+                                var totalDx = 0f
+                                var totalDy = 0f
+                                var armedLongPress = false
+                                var isDragging = false
+                                var longPressTimedOut = false
+
+                                try {
+                                    // Phase A: Before touchSlop or Long-Press timeout
+                                    while (!armedLongPress && !isDragging) {
+                                        val elapsedMs = (System.nanoTime() - startNanos) / 1_000_000L
+                                        val event = if (!longPressTimedOut && longPressSwipeUpAiChatEnabled) {
+                                            val remainingMs = (longPressTimeoutMs - elapsedMs).coerceAtLeast(1L)
+                                            withTimeoutOrNull(remainingMs) {
+                                                awaitPointerEvent(PointerEventPass.Main)
+                                            }
+                                        } else {
+                                            awaitPointerEvent(PointerEventPass.Main)
                                         }
-                                    } else if (swipeLeftRightTabSwitch && abs(dragX) > sensitivityPx) {
-                                        latestOnSwipeTab(if (dragX < 0f) 1 else -1)
+
+                                        if (event == null) {
+                                            longPressTimedOut = true
+                                            if (longPressSwipeUpAiChatEnabled) {
+                                                armedLongPress = true
+                                                isLongPressArmed = true
+                                                performAddressLongPressHaptic(context, hapticFeedback)
+                                                pendingSingleTapJob?.cancel()
+                                                pendingSingleTapJob = null
+                                            }
+                                            continue
+                                        }
+
+                                        val change = event.changes.firstOrNull { it.id == down.id }
+                                            ?: event.changes.firstOrNull()
+                                        if (change == null || !change.pressed) {
+                                            if (change != null && !change.isConsumed) {
+                                                change.consume()
+                                                if (isDoubleTapCandidate) {
+                                                    latestOnDoubleTap()
+                                                } else if (gesturesEnabled && doubleTapAction != BrowserPreferences.GESTURE_NONE) {
+                                                    pendingSingleTapJob = gestureScope.launch {
+                                                        delay(doubleTapTimeoutMs)
+                                                        latestOnTapToEdit()
+                                                    }
+                                                } else {
+                                                    latestOnTapToEdit()
+                                                }
+                                            }
+                                            return@awaitEachGesture
+                                        }
+
+                                        val delta = change.positionChange()
+                                        totalDx += delta.x
+                                        totalDy += delta.y
+                                        if (hypot(totalDx, totalDy) > touchSlop) {
+                                            pendingSingleTapJob?.cancel()
+                                            pendingSingleTapJob = null
+                                            isDragging = true
+                                            if (gesturesEnabled) {
+                                                change.consume()
+                                            }
+                                        }
                                     }
-                                    dragX = 0f
-                                    dragY = 0f
+
+                                    // Phase B: Armed long-press drag OR immediate swipe drag
+                                    while (armedLongPress || isDragging) {
+                                        val event = awaitPointerEvent(PointerEventPass.Main)
+                                        val change = event.changes.firstOrNull { it.id == down.id }
+                                            ?: event.changes.firstOrNull()
+
+                                        if (change == null || !change.pressed) {
+                                            if (armedLongPress) {
+                                                isLongPressArmed = false
+                                                targetVisualDragX = 0f
+                                                targetVisualDragY = 0f
+                                                if (longPressSwipeUpAiChatEnabled &&
+                                                    totalDy < -sensitivityPx &&
+                                                    abs(totalDy) >= abs(totalDx)
+                                                ) {
+                                                    change?.consume()
+                                                    latestOnLongPressSwipeUpAiChat()
+                                                } else if (change != null && !change.isConsumed) {
+                                                    change.consume()
+                                                    latestOnTapToEdit()
+                                                }
+                                            } else if (gesturesEnabled) {
+                                                if (swipeLeftRightTabSwitch &&
+                                                    abs(totalDx) > abs(totalDy) &&
+                                                    abs(totalDx) > sensitivityPx
+                                                ) {
+                                                    latestOnSwipeTab(if (totalDx < 0f) 1 else -1)
+                                                } else if (abs(totalDy) >= abs(totalDx)) {
+                                                    if (totalDy < -sensitivityPx &&
+                                                        swipeUpAction != BrowserPreferences.GESTURE_NONE
+                                                    ) {
+                                                        latestOnSwipeUp()
+                                                    } else if (totalDy > sensitivityPx &&
+                                                        swipeDownAction != BrowserPreferences.GESTURE_NONE
+                                                    ) {
+                                                        latestOnSwipeDown()
+                                                    }
+                                                }
+                                            }
+                                            break
+                                        }
+
+                                        val delta = change.positionChange()
+                                        totalDx += delta.x
+                                        totalDy += delta.y
+                                        if (armedLongPress) {
+                                            change.consume()
+                                            targetVisualDragX = 0f
+                                            targetVisualDragY = if (totalDy < 0f) {
+                                                (totalDy * 0.42f).coerceIn(-maxArmedLiftPx, 0f)
+                                            } else {
+                                                0f
+                                            }
+                                        } else if (gesturesEnabled) {
+                                            change.consume()
+                                            targetVisualDragY = 0f
+                                            targetVisualDragX = if (swipeLeftRightTabSwitch && abs(totalDx) > abs(totalDy)) {
+                                                (totalDx * 0.42f).coerceIn(-maxVisualDragPx, maxVisualDragPx)
+                                            } else {
+                                                0f
+                                            }
+                                        }
+                                    }
+                                } finally {
+                                    isLongPressArmed = false
                                     targetVisualDragX = 0f
-                                },
-                                onDragCancel = {
-                                    dragX = 0f
-                                    dragY = 0f
-                                    targetVisualDragX = 0f
-                                },
-                            )
+                                    targetVisualDragY = 0f
+                                }
+                            }
                         }
                         .testTag("address_capsule_resting")
                 } else {
@@ -1850,3 +2031,34 @@ private fun padlockTintFor(state: SecurityState): Color =
         SecurityState.INSECURE -> AmberWarn
         SecurityState.NEUTRAL -> PureFrost.copy(alpha = 0.88f)
     }
+
+private fun performAddressLongPressHaptic(
+    context: Context,
+    hapticFeedback: HapticFeedback,
+) {
+    hapticFeedback.performHapticFeedback(HapticFeedbackType.LongPress)
+    runCatching {
+        val vibrator: Vibrator? = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            val manager = context.getSystemService(Context.VIBRATOR_MANAGER_SERVICE) as? VibratorManager
+            manager?.defaultVibrator
+        } else {
+            @Suppress("DEPRECATION")
+            context.getSystemService(Context.VIBRATOR_SERVICE) as? Vibrator
+        }
+        if (vibrator?.hasVibrator() == true) {
+            when {
+                Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q -> {
+                    vibrator.vibrate(VibrationEffect.createPredefined(VibrationEffect.EFFECT_HEAVY_CLICK))
+                }
+                Build.VERSION.SDK_INT >= Build.VERSION_CODES.O -> {
+                    vibrator.vibrate(VibrationEffect.createOneShot(35L, VibrationEffect.DEFAULT_AMPLITUDE))
+                }
+                else -> {
+                    @Suppress("DEPRECATION")
+                    vibrator.vibrate(35L)
+                }
+            }
+        }
+    }
+}
+

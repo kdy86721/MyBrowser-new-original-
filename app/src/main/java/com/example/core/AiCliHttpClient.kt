@@ -2,6 +2,7 @@ package com.example.core
 
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.addJsonObject
@@ -17,6 +18,7 @@ import java.io.InputStreamReader
 import java.io.OutputStreamWriter
 import java.net.HttpURLConnection
 import java.net.URL
+import java.net.URLEncoder
 
 data class AiCliResponse(
     val text: String,
@@ -24,13 +26,22 @@ data class AiCliResponse(
     val model: String,
 )
 
+@Serializable
+data class AiChatTurn(
+    val isUser: Boolean,
+    val text: String,
+)
+
 class MissingApiKeyException(val profileName: String) :
     IllegalStateException("$profileName API 키가 설정되지 않았습니다.")
 
+class MissingModelSelectionException(val profileName: String) :
+    IllegalStateException("${profileName}의 사용할 모델이 선택되지 않았습니다. 'AI 설정'에서 연결 확인 및 모델 불러오기를 실행해 주세요.")
+
 /**
  * Pure AOSP HttpURLConnection client executing on [Dispatchers.IO].
- * Supports Gemini CLI, Claude CLI, Codex / OpenAI CLI, Ollama local CLI, and Custom REST bridges
- * with zero GMS or Android Context dependencies so it can migrate into Rust FFI later.
+ * Supports Gemini CLI, Claude CLI, Codex / OpenAI CLI, Kimi CLI, Ollama local CLI,
+ * and Custom OpenAI-compatible CLI bridges with dynamic model discovery and zero GMS/Android dependencies.
  */
 object AiCliHttpClient {
 
@@ -38,54 +49,24 @@ object AiCliHttpClient {
         ignoreUnknownKeys = true
     }
 
-    suspend fun requestPageAnalysis(
+    suspend fun fetchAvailableModels(
         profile: AiCliProfile,
-        pageTitle: String,
-        pageUrl: String,
-        pageContentText: String,
-        userQuestion: String? = null,
-    ): Result<AiCliResponse> = withContext(Dispatchers.IO) {
+    ): Result<List<String>> = withContext(Dispatchers.IO) {
         runCatching {
-            val endpoint = profile.endpointOrCommand.trim()
-            require(endpoint.startsWith("http://") || endpoint.startsWith("https://")) {
-                "유효한 HTTP/HTTPS AI 엔드포인트 URL이 필요합니다: $endpoint"
-            }
+            val endpoint = validateEndpoint(profile.endpointOrCommand)
+            validateRemoteKey(profile, endpoint)
 
-            val requiresRemoteKey = profile.cliType in setOf(
-                AiCliProfile.CLI_TYPE_GEMINI,
-                AiCliProfile.CLI_TYPE_CLAUDE,
-                AiCliProfile.CLI_TYPE_OPENAI,
-            ) && !isLocalLoopback(endpoint)
-
-            if (requiresRemoteKey && profile.apiKey.isBlank()) {
-                throw MissingApiKeyException(profile.name)
-            }
-
-            val promptText = buildPromptPayload(
-                pageTitle = pageTitle,
-                pageUrl = pageUrl,
-                pageContentText = pageContentText,
-                userQuestion = userQuestion,
-            )
-
-            val (targetUrl, headers, requestBody) = buildHttpSpec(profile, promptText)
-            val connection = (URL(targetUrl).openConnection() as HttpURLConnection).apply {
-                requestMethod = "POST"
-                connectTimeout = 15_000
-                readTimeout = 45_000
+            val (modelsUrl, headers) = buildModelsFetchSpec(profile, endpoint)
+            val connection = (URL(modelsUrl).openConnection() as HttpURLConnection).apply {
+                requestMethod = "GET"
+                connectTimeout = 12_000
+                readTimeout = 20_000
                 doInput = true
-                doOutput = true
-                setRequestProperty("Content-Type", "application/json; charset=UTF-8")
                 setRequestProperty("Accept", "application/json")
                 headers.forEach { (k, v) -> setRequestProperty(k, v) }
             }
 
             try {
-                OutputStreamWriter(connection.outputStream, Charsets.UTF_8).use { writer ->
-                    writer.write(requestBody)
-                    writer.flush()
-                }
-
                 val statusCode = connection.responseCode
                 val rawStream = if (statusCode in 200..299) {
                     connection.inputStream
@@ -98,43 +79,306 @@ object AiCliHttpClient {
 
                 if (statusCode !in 200..299) {
                     val serverError = extractErrorMessage(rawBody)
-                    throw IllegalStateException(
-                        "HTTP $statusCode 오류 (${profile.name}): ${serverError.ifBlank { rawBody.take(220) }}"
-                    )
+                    val reason = when (statusCode) {
+                        401, 403 -> "인증 실패 (HTTP $statusCode): API 키 또는 권한을 확인하세요."
+                        404 -> "모델 목록 엔드포인트(HTTP 404)를 찾을 수 없습니다: $modelsUrl"
+                        else -> "HTTP $statusCode 오류: ${serverError.ifBlank { rawBody.take(200) }}"
+                    }
+                    throw IllegalStateException(reason)
                 }
 
-                val parsedText = extractResponseText(profile.cliType, rawBody).trim()
-                if (parsedText.isEmpty()) {
-                    throw IllegalStateException("AI 응답 본문이 비어 있습니다.")
+                val parsedModels = parseAvailableModelsResponse(profile.cliType, rawBody)
+                if (parsedModels.isEmpty()) {
+                    throw IllegalStateException("서버에서 사용 가능한 모델 목록을 찾지 못했습니다.")
                 }
-
-                AiCliResponse(
-                    text = parsedText,
-                    profileName = profile.name,
-                    model = profile.selectedModel,
-                )
+                parsedModels
             } finally {
                 connection.disconnect()
             }
         }
     }
 
+    suspend fun requestPageAnalysis(
+        profile: AiCliProfile,
+        pageTitle: String,
+        pageUrl: String,
+        pageContentText: String,
+        userQuestion: String? = null,
+    ): Result<AiCliResponse> = withContext(Dispatchers.IO) {
+        runCatching {
+            val endpoint = validateEndpoint(profile.endpointOrCommand)
+            validateRemoteKey(profile, endpoint)
+            if (profile.selectedModel.isBlank()) {
+                throw MissingModelSelectionException(profile.name)
+            }
+
+            val promptText = buildPromptPayload(
+                pageTitle = pageTitle,
+                pageUrl = pageUrl,
+                pageContentText = pageContentText,
+                userQuestion = userQuestion,
+            )
+
+            executeChatPost(
+                profile = profile,
+                endpoint = endpoint,
+                turns = listOf(AiChatTurn(isUser = true, text = promptText)),
+            )
+        }
+    }
+
+    suspend fun requestAiChat(
+        profile: AiCliProfile,
+        conversation: List<AiChatTurn>,
+        pageTitle: String,
+        pageUrl: String,
+        pageContentText: String,
+    ): Result<AiCliResponse> = withContext(Dispatchers.IO) {
+        runCatching {
+            val endpoint = validateEndpoint(profile.endpointOrCommand)
+            validateRemoteKey(profile, endpoint)
+            if (profile.selectedModel.isBlank()) {
+                throw MissingModelSelectionException(profile.name)
+            }
+
+            val contextHeader = buildString {
+                if (pageUrl.isNotBlank()) {
+                    appendLine("[현재 브라우저 탭 컨텍스트]")
+                    if (pageTitle.isNotBlank()) appendLine("제목: $pageTitle")
+                    appendLine("URL: $pageUrl")
+                    if (pageContentText.isNotBlank()) {
+                        appendLine("페이지 본문 일부:")
+                        appendLine(pageContentText.take(3500))
+                    }
+                    appendLine("---")
+                }
+            }
+
+            val enrichedTurns = conversation.mapIndexed { idx, turn ->
+                if (idx == 0 && turn.isUser && contextHeader.isNotBlank()) {
+                    turn.copy(text = "$contextHeader${turn.text}")
+                } else {
+                    turn
+                }
+            }
+
+            executeChatPost(
+                profile = profile,
+                endpoint = endpoint,
+                turns = enrichedTurns,
+            )
+        }
+    }
+
+    private fun executeChatPost(
+        profile: AiCliProfile,
+        endpoint: String,
+        turns: List<AiChatTurn>,
+    ): AiCliResponse {
+        val (targetUrl, headers, requestBody) = buildHttpSpec(profile, endpoint, turns)
+        val connection = (URL(targetUrl).openConnection() as HttpURLConnection).apply {
+            requestMethod = "POST"
+            connectTimeout = 15_000
+            readTimeout = 45_000
+            doInput = true
+            doOutput = true
+            setRequestProperty("Content-Type", "application/json; charset=UTF-8")
+            setRequestProperty("Accept", "application/json")
+            headers.forEach { (k, v) -> setRequestProperty(k, v) }
+        }
+
+        try {
+            OutputStreamWriter(connection.outputStream, Charsets.UTF_8).use { writer ->
+                writer.write(requestBody)
+                writer.flush()
+            }
+
+            val statusCode = connection.responseCode
+            val rawStream = if (statusCode in 200..299) {
+                connection.inputStream
+            } else {
+                connection.errorStream ?: connection.inputStream
+            }
+            val rawBody = rawStream?.use { stream ->
+                BufferedReader(InputStreamReader(stream, Charsets.UTF_8)).readText()
+            }.orEmpty()
+
+            if (statusCode !in 200..299) {
+                val serverError = extractErrorMessage(rawBody)
+                throw IllegalStateException(
+                    "HTTP $statusCode 오류 (${profile.name}): ${serverError.ifBlank { rawBody.take(220) }}"
+                )
+            }
+
+            val parsedText = extractResponseText(profile.cliType, rawBody).trim()
+            if (parsedText.isEmpty()) {
+                throw IllegalStateException("AI 응답 본문이 비어 있습니다.")
+            }
+
+            return AiCliResponse(
+                text = parsedText,
+                profileName = profile.name,
+                model = profile.selectedModel,
+            )
+        } finally {
+            connection.disconnect()
+        }
+    }
+
+    private fun validateEndpoint(rawEndpoint: String): String {
+        val endpoint = rawEndpoint.trim()
+        require(endpoint.startsWith("http://") || endpoint.startsWith("https://")) {
+            "유효한 HTTP/HTTPS AI 엔드포인트 URL이 필요합니다: $endpoint"
+        }
+        return endpoint
+    }
+
+    private fun validateRemoteKey(profile: AiCliProfile, endpoint: String) {
+        val requiresRemoteKey = profile.cliType in setOf(
+            AiCliProfile.CLI_TYPE_GEMINI,
+            AiCliProfile.CLI_TYPE_CLAUDE,
+            AiCliProfile.CLI_TYPE_OPENAI,
+            AiCliProfile.CLI_TYPE_KIMI,
+        ) && !isLocalLoopback(endpoint)
+
+        if (requiresRemoteKey && profile.apiKey.isBlank()) {
+            throw MissingApiKeyException(profile.name)
+        }
+    }
+
+    private fun buildModelsFetchSpec(
+        profile: AiCliProfile,
+        cleanEndpoint: String,
+    ): Pair<String, Map<String, String>> {
+        val trimmed = cleanEndpoint.trimEnd('/')
+        return when (profile.cliType) {
+            AiCliProfile.CLI_TYPE_GEMINI -> {
+                val baseWithoutAction = trimmed
+                    .substringBefore(":generateContent")
+                    .trimEnd('/')
+                val modelsEndpoint = if (baseWithoutAction.endsWith("/models")) {
+                    baseWithoutAction
+                } else {
+                    "$baseWithoutAction/models"
+                }
+                val encodedKey = URLEncoder.encode(profile.apiKey.trim(), "UTF-8")
+                val fullUrl = if (profile.apiKey.isNotBlank()) {
+                    if (modelsEndpoint.contains('?')) {
+                        "$modelsEndpoint&key=$encodedKey"
+                    } else {
+                        "$modelsEndpoint?key=$encodedKey"
+                    }
+                } else {
+                    modelsEndpoint
+                }
+                fullUrl to emptyMap()
+            }
+
+            AiCliProfile.CLI_TYPE_OLLAMA -> {
+                val root = trimmed
+                    .removeSuffix("/api/chat")
+                    .removeSuffix("/api/generate")
+                    .removeSuffix("/api/tags")
+                    .trimEnd('/')
+                val headers = buildMap {
+                    if (profile.apiKey.isNotBlank()) {
+                        put("Authorization", "Bearer ${profile.apiKey.trim()}")
+                    }
+                }
+                "$root/api/tags" to headers
+            }
+
+            AiCliProfile.CLI_TYPE_CLAUDE -> {
+                val base = trimmed
+                    .removeSuffix("/messages")
+                    .removeSuffix("/models")
+                    .trimEnd('/')
+                val headers = buildMap {
+                    if (profile.apiKey.isNotBlank()) {
+                        put("x-api-key", profile.apiKey.trim())
+                    }
+                    put("anthropic-version", "2023-06-01")
+                }
+                "$base/models" to headers
+            }
+
+            else -> {
+                // Kimi CLI, OpenAI/Codex CLI, Custom OpenAI-compatible CLI bridges
+                val base = trimmed
+                    .removeSuffix("/chat/completions")
+                    .removeSuffix("/completions")
+                    .removeSuffix("/responses")
+                    .removeSuffix("/models")
+                    .trimEnd('/')
+                val headers = buildMap {
+                    if (profile.apiKey.isNotBlank()) {
+                        put("Authorization", "Bearer ${profile.apiKey.trim()}")
+                    }
+                }
+                "$base/models" to headers
+            }
+        }
+    }
+
+    internal fun parseAvailableModelsResponse(
+        cliType: String,
+        rawJson: String,
+    ): List<String> {
+        val root = runCatching { jsonCodec.parseToJsonElement(rawJson).jsonObject }.getOrNull()
+            ?: return emptyList()
+
+        return when (cliType) {
+            AiCliProfile.CLI_TYPE_GEMINI -> {
+                val modelsArr = root["models"]?.jsonArray ?: return emptyList()
+                modelsArr.mapNotNull { el ->
+                    val obj = el as? JsonObject ?: return@mapNotNull null
+                    val rawName = obj["name"]?.jsonPrimitive?.contentOrNull?.trim().orEmpty()
+                    if (rawName.isEmpty()) return@mapNotNull null
+                    val methods = obj["supportedGenerationMethods"]?.jsonArray
+                        ?.mapNotNull { it.jsonPrimitive.contentOrNull }
+                        .orEmpty()
+                    if (methods.isNotEmpty() && "generateContent" !in methods) {
+                        return@mapNotNull null
+                    }
+                    rawName.removePrefix("models/")
+                }.distinct()
+            }
+
+            AiCliProfile.CLI_TYPE_OLLAMA -> {
+                val modelsArr = root["models"]?.jsonArray ?: return emptyList()
+                modelsArr.mapNotNull { el ->
+                    val obj = el as? JsonObject ?: return@mapNotNull null
+                    (obj["name"] ?: obj["model"])?.jsonPrimitive?.contentOrNull?.trim()
+                }.filter { it.isNotEmpty() }.distinct()
+            }
+
+            else -> {
+                val dataArr = root["data"]?.jsonArray ?: root["models"]?.jsonArray ?: return emptyList()
+                dataArr.mapNotNull { el ->
+                    val obj = el as? JsonObject ?: return@mapNotNull null
+                    (obj["id"] ?: obj["name"])?.jsonPrimitive?.contentOrNull?.trim()
+                }.filter { it.isNotEmpty() }.distinct()
+            }
+        }
+    }
+
     private fun buildHttpSpec(
         profile: AiCliProfile,
-        userPrompt: String,
+        cleanEndpoint: String,
+        turns: List<AiChatTurn>,
     ): Triple<String, Map<String, String>, String> {
-        val cleanEndpoint = profile.endpointOrCommand.trim()
+        val trimmed = cleanEndpoint.trimEnd('/')
         val systemText = profile.systemPrompt.ifBlank { AiCliProfile.DEFAULT_AI_SYSTEM_PROMPT }
         val temp = profile.temperature.coerceIn(0f, 1.5f).toDouble()
+        val cleanModel = profile.selectedModel.trim().removePrefix("models/")
 
         return when (profile.cliType) {
             AiCliProfile.CLI_TYPE_GEMINI -> {
-                val url = if (cleanEndpoint.contains("generativelanguage.googleapis.com") &&
-                    !cleanEndpoint.contains(":generateContent")
-                ) {
-                    "${cleanEndpoint.trimEnd('/')}/${profile.selectedModel}:generateContent"
+                val url = if (trimmed.contains(":generateContent")) {
+                    trimmed
                 } else {
-                    cleanEndpoint
+                    val modelsBase = if (trimmed.endsWith("/models")) trimmed else "$trimmed/models"
+                    "$modelsBase/$cleanModel:generateContent"
                 }
                 val headers = buildMap {
                     if (profile.apiKey.isNotBlank()) {
@@ -148,11 +392,13 @@ object AiCliHttpClient {
                         })
                     })
                     put("contents", buildJsonArray {
-                        addJsonObject {
-                            put("role", "user")
-                            put("parts", buildJsonArray {
-                                addJsonObject { put("text", userPrompt) }
-                            })
+                        turns.forEach { turn ->
+                            addJsonObject {
+                                put("role", if (turn.isUser) "user" else "model")
+                                put("parts", buildJsonArray {
+                                    addJsonObject { put("text", turn.text) }
+                                })
+                            }
                         }
                     })
                     put("generationConfig", buildJsonObject {
@@ -163,6 +409,11 @@ object AiCliHttpClient {
             }
 
             AiCliProfile.CLI_TYPE_CLAUDE -> {
+                val url = if (trimmed.endsWith("/messages")) {
+                    trimmed
+                } else {
+                    "$trimmed/messages"
+                }
                 val headers = buildMap {
                     if (profile.apiKey.isNotBlank()) {
                         put("x-api-key", profile.apiKey.trim())
@@ -170,28 +421,35 @@ object AiCliHttpClient {
                     put("anthropic-version", "2023-06-01")
                 }
                 val body = buildJsonObject {
-                    put("model", profile.selectedModel)
-                    put("max_tokens", 1200)
+                    put("model", cleanModel)
+                    put("max_tokens", 1400)
                     put("temperature", temp.coerceAtMost(1.0))
                     put("system", systemText)
                     put("messages", buildJsonArray {
-                        addJsonObject {
-                            put("role", "user")
-                            put("content", userPrompt)
+                        turns.forEach { turn ->
+                            addJsonObject {
+                                put("role", if (turn.isUser) "user" else "assistant")
+                                put("content", turn.text)
+                            }
                         }
                     })
                 }.toString()
-                Triple(cleanEndpoint, headers, body)
+                Triple(url, headers, body)
             }
 
             AiCliProfile.CLI_TYPE_OLLAMA -> {
+                val url = if (trimmed.endsWith("/api/chat") || trimmed.endsWith("/api/generate")) {
+                    trimmed
+                } else {
+                    "${trimmed.removeSuffix("/api/tags")}/api/chat"
+                }
                 val headers = buildMap {
                     if (profile.apiKey.isNotBlank()) {
                         put("Authorization", "Bearer ${profile.apiKey.trim()}")
                     }
                 }
                 val body = buildJsonObject {
-                    put("model", profile.selectedModel)
+                    put("model", cleanModel)
                     put("stream", false)
                     put("options", buildJsonObject {
                         put("temperature", temp)
@@ -201,37 +459,49 @@ object AiCliHttpClient {
                             put("role", "system")
                             put("content", systemText)
                         }
-                        addJsonObject {
-                            put("role", "user")
-                            put("content", userPrompt)
+                        turns.forEach { turn ->
+                            addJsonObject {
+                                put("role", if (turn.isUser) "user" else "assistant")
+                                put("content", turn.text)
+                            }
                         }
                     })
                 }.toString()
-                Triple(cleanEndpoint, headers, body)
+                Triple(url, headers, body)
             }
 
             else -> {
-                // Codex / OpenAI CLI & Custom OpenAI-compatible CLI bridge
+                // Kimi CLI, Codex / OpenAI CLI, and Custom OpenAI-compatible CLI bridge
+                val url = if (trimmed.endsWith("/chat/completions") ||
+                    trimmed.endsWith("/completions") ||
+                    trimmed.endsWith("/responses")
+                ) {
+                    trimmed
+                } else {
+                    "${trimmed.removeSuffix("/models")}/chat/completions"
+                }
                 val headers = buildMap {
                     if (profile.apiKey.isNotBlank()) {
                         put("Authorization", "Bearer ${profile.apiKey.trim()}")
                     }
                 }
                 val body = buildJsonObject {
-                    put("model", profile.selectedModel)
+                    put("model", cleanModel)
                     put("temperature", temp)
                     put("messages", buildJsonArray {
                         addJsonObject {
                             put("role", "system")
                             put("content", systemText)
                         }
-                        addJsonObject {
-                            put("role", "user")
-                            put("content", userPrompt)
+                        turns.forEach { turn ->
+                            addJsonObject {
+                                put("role", if (turn.isUser) "user" else "assistant")
+                                put("content", turn.text)
+                            }
                         }
                     })
                 }.toString()
-                Triple(cleanEndpoint, headers, body)
+                Triple(url, headers, body)
             }
         }
     }

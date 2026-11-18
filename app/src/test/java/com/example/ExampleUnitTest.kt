@@ -1,5 +1,6 @@
 package com.example
 
+import com.example.core.AiCliHttpClient
 import com.example.core.AiCliProfile
 import com.example.core.BrowserPreferences
 import com.example.core.LocalKotlinCore
@@ -234,10 +235,11 @@ class ExampleUnitTest {
     }
 
     @Test
-    fun `gesture settings defaults, clamping, toolbar AI action, and reset work cleanly`() {
+    fun `gesture settings defaults, clamping, long-press AI chat toggle, and reset work cleanly`() {
         val core = LocalKotlinCore()
         val defaults = core.getSnapshot().preferences
         assertTrue(defaults.gesturesEnabled)
+        assertTrue(defaults.longPressSwipeUpAiChatEnabled)
         assertEquals(BrowserPreferences.GESTURE_OPEN_TABS, defaults.swipeUpAction)
         assertEquals(BrowserPreferences.GESTURE_RELOAD, defaults.swipeDownAction)
         assertTrue(defaults.swipeLeftRightTabSwitch)
@@ -251,6 +253,7 @@ class ExampleUnitTest {
             swipeLeftRightTabSwitch = false,
             doubleTapAction = BrowserPreferences.GESTURE_BOOKMARK,
             gestureSensitivityDp = 999f, // clamps to 64f
+            longPressSwipeUpAiChatEnabled = false,
         )
         core.setToolbarActions(
             left = listOf(ToolbarAction.BACK, ToolbarAction.PAGE_SUMMARY),
@@ -259,6 +262,7 @@ class ExampleUnitTest {
 
         val updated = core.getSnapshot().preferences
         assertFalse(updated.gesturesEnabled)
+        assertFalse(updated.longPressSwipeUpAiChatEnabled)
         assertEquals(BrowserPreferences.GESTURE_NEW_TAB, updated.swipeUpAction)
         assertEquals(BrowserPreferences.GESTURE_QUICK_MENU, updated.swipeDownAction)
         assertFalse(updated.swipeLeftRightTabSwitch)
@@ -274,6 +278,7 @@ class ExampleUnitTest {
         assertTrue(restored.importStateJson(json))
         val rp = restored.getSnapshot().preferences
         assertFalse(rp.gesturesEnabled)
+        assertFalse(rp.longPressSwipeUpAiChatEnabled)
         assertEquals(BrowserPreferences.GESTURE_BOOKMARK, rp.doubleTapAction)
         assertEquals(20f, rp.gestureSensitivityDp, 0.001f)
         assertTrue(ToolbarAction.PAGE_SUMMARY in rp.toolbarConfig.leftActions)
@@ -281,22 +286,64 @@ class ExampleUnitTest {
         core.resetGestureSettings()
         val resetPrefs = core.getSnapshot().preferences
         assertTrue(resetPrefs.gesturesEnabled)
+        assertTrue(resetPrefs.longPressSwipeUpAiChatEnabled)
         assertEquals(BrowserPreferences.GESTURE_OPEN_TABS, resetPrefs.swipeUpAction)
         assertEquals(BrowserPreferences.DEFAULT_GESTURE_SENSITIVITY_DP, resetPrefs.gestureSensitivityDp, 0.001f)
     }
 
     @Test
-    fun `multi-AI CLI presets, custom model and profile management, and json roundtrip`() {
+    fun `kimi cli preset, dynamic model discovery, and multi-AI profile management`() {
         val core = LocalKotlinCore()
         val defaults = core.getSnapshot().preferences
-        assertEquals(5, defaults.aiProfiles.size)
+        assertEquals(6, defaults.aiProfiles.size)
         assertEquals("gemini_cli", defaults.activeAiProfile().id)
-        assertEquals("gemini-2.5-flash", defaults.activeAiProfile().selectedModel)
+        assertTrue(defaults.activeAiProfile().availableModels.isEmpty())
+        assertEquals("", defaults.activeAiProfile().selectedModel)
 
-        // Select Claude CLI and customize model + temperature + key
+        val kimiPreset = defaults.aiProfiles.firstOrNull { it.id == "kimi_cli" }
+        assertNotNull(kimiPreset)
+        assertEquals(AiCliProfile.CLI_TYPE_KIMI, kimiPreset!!.cliType)
+        assertEquals(BrowserPreferences.KIMI_GLOBAL_ENDPOINT, kimiPreset.endpointOrCommand)
+
+        // Dynamic model injection auto-selects the first fetched model when empty
+        core.selectAiProfile("kimi_cli")
+        core.setAiProfileModels(
+            profileId = "kimi_cli",
+            models = listOf("moonshot-v1-8k", "kimi-k2-0711-preview", "moonshot-v1-8k"),
+        )
+        val populatedKimi = core.getSnapshot().preferences.activeAiProfile()
+        assertEquals(listOf("moonshot-v1-8k", "kimi-k2-0711-preview"), populatedKimi.availableModels)
+        assertEquals("moonshot-v1-8k", populatedKimi.selectedModel)
+
+        // Select a second model and verify subsequent fetch preserves valid selectedModel
+        core.updateAiProfile(profileId = "kimi_cli", selectedModel = "kimi-k2-0711-preview")
+        core.setAiProfileModels(
+            profileId = "kimi_cli",
+            models = listOf("moonshot-v1-8k", "moonshot-v1-32k", "kimi-k2-0711-preview"),
+        )
+        assertEquals("kimi-k2-0711-preview", core.getSnapshot().preferences.activeAiProfile().selectedModel)
+
+        // Verify JSON parsing for OpenAI/Kimi, Ollama, and Gemini /models payloads
+        val kimiParsed = AiCliHttpClient.parseAvailableModelsResponse(
+            cliType = AiCliProfile.CLI_TYPE_KIMI,
+            rawJson = """{"data":[{"id":"moonshot-v1-8k"},{"id":"kimi-k2-0711-preview"}]}""",
+        )
+        assertEquals(listOf("moonshot-v1-8k", "kimi-k2-0711-preview"), kimiParsed)
+
+        val ollamaParsed = AiCliHttpClient.parseAvailableModelsResponse(
+            cliType = AiCliProfile.CLI_TYPE_OLLAMA,
+            rawJson = """{"models":[{"name":"llama3.2:latest"},{"name":"qwen2.5:7b"}]}""",
+        )
+        assertEquals(listOf("llama3.2:latest", "qwen2.5:7b"), ollamaParsed)
+
+        val geminiParsed = AiCliHttpClient.parseAvailableModelsResponse(
+            cliType = AiCliProfile.CLI_TYPE_GEMINI,
+            rawJson = """{"models":[{"name":"models/gemini-2.5-flash","supportedGenerationMethods":["generateContent"]},{"name":"models/embedding-001","supportedGenerationMethods":["embedContent"]}]}""",
+        )
+        assertEquals(listOf("gemini-2.5-flash"), geminiParsed)
+
+        // Customize Claude CLI + temperature clamping + delete protection
         core.selectAiProfile("claude_cli")
-        assertEquals("claude_cli", core.getSnapshot().preferences.activeAiProfile().id)
-
         core.updateAiProfile(
             profileId = "claude_cli",
             apiKey = "test-claude-key",
@@ -311,11 +358,10 @@ class ExampleUnitTest {
         assertEquals(1.5f, claude.temperature, 0.001f)
         assertEquals("3줄 핵심 요약", claude.systemPrompt)
 
-        // Built-in profiles cannot be deleted
         core.deleteAiProfile("claude_cli")
         assertTrue(core.getSnapshot().preferences.aiProfiles.any { it.id == "claude_cli" })
 
-        // Add custom AI CLI profile
+        // Add custom AI CLI profile -> JSON roundtrip -> delete safely
         core.addCustomAiProfile(
             name = "DeepSeek Bridge",
             cliType = AiCliProfile.CLI_TYPE_CUSTOM,
@@ -328,19 +374,53 @@ class ExampleUnitTest {
         assertTrue(customActive.isCustom)
         assertEquals("DeepSeek Bridge", customActive.name)
         assertEquals("deepseek-chat", customActive.selectedModel)
-        assertEquals(6, core.getSnapshot().preferences.aiProfiles.size)
+        assertEquals(7, core.getSnapshot().preferences.aiProfiles.size)
 
-        // JSON roundtrip preserves all custom AI profiles and active selection
         val json = core.exportStateJson()
         val restored = LocalKotlinCore()
         assertTrue(restored.importStateJson(json))
         assertEquals(customActive.id, restored.getSnapshot().preferences.activeAiProfile().id)
         assertEquals("DeepSeek Bridge", restored.getSnapshot().preferences.activeAiProfile().name)
-        assertEquals(6, restored.getSnapshot().preferences.aiProfiles.size)
+        assertEquals(7, restored.getSnapshot().preferences.aiProfiles.size)
 
-        // Custom AI profile can be deleted cleanly, falling back activeAiProfileId safely
         core.deleteAiProfile(customActive.id)
-        assertEquals(5, core.getSnapshot().preferences.aiProfiles.size)
+        assertEquals(6, core.getSnapshot().preferences.aiProfiles.size)
         assertEquals("gemini_cli", core.getSnapshot().preferences.activeAiProfile().id)
+    }
+
+    @Test
+    fun `rapid tab creation, closing last tab, and corrupted activeTabId coercion never throw`() {
+        val core = LocalKotlinCore(initialHomeUrl = "https://duckduckgo.com")
+        val createdIds = mutableListOf(core.getSnapshot().activeTabId)
+
+        repeat(20) { idx ->
+            val snap = core.createTab(initialUrl = "example$idx.com", activate = true)
+            assertEquals(idx + 2, snap.tabs.size)
+            assertEquals(snap.tabs.last().id, snap.activeTabId)
+            assertNotNull(snap.activeTab)
+            createdIds += snap.activeTabId
+        }
+
+        // Switching to a nonexistent tab keeps current valid activeTab safely
+        val beforeInvalidSwitch = core.getSnapshot().activeTabId
+        val afterInvalidSwitch = core.switchTab("nonexistent_tab_999")
+        assertEquals(beforeInvalidSwitch, afterInvalidSwitch.activeTabId)
+
+        // Closing all tabs always regenerates 1 clean fallback tab without empty-list crash
+        createdIds.forEach { id ->
+            val snap = core.closeTab(id)
+            assertTrue(snap.tabs.isNotEmpty())
+            assertNotNull(snap.activeTab)
+        }
+        assertEquals(1, core.getSnapshot().tabs.size)
+
+        // Importing JSON with a dangling activeTabId coerces safely to index 0
+        val exported = core.exportStateJson()
+        val activeId = core.getSnapshot().activeTabId
+        val corrupted = exported.replace("\"activeTabId\":\"$activeId\"", "\"activeTabId\":\"missing_id\"")
+        val restored = LocalKotlinCore()
+        assertTrue(restored.importStateJson(corrupted))
+        assertEquals(restored.getSnapshot().tabs.first().id, restored.getSnapshot().activeTabId)
+        assertNotNull(restored.getSnapshot().activeTab)
     }
 }

@@ -61,6 +61,7 @@ fun GesturesSettingsPage(
         swipeLeftRightTabSwitch: Boolean?,
         doubleTapAction: Int?,
         gestureSensitivityDp: Float?,
+        longPressSwipeUpAiChatEnabled: Boolean?,
     ) -> Unit,
     onResetGestureSettings: () -> Unit,
 ) {
@@ -74,7 +75,17 @@ fun GesturesSettingsPage(
         checked = prefs.gesturesEnabled,
         unifiedRadius = unifiedRadius,
         testTag = "toggle_gestures_enabled",
-        onCheckedChange = { onUpdateGestureSettings(it, null, null, null, null, null) },
+        onCheckedChange = { onUpdateGestureSettings(it, null, null, null, null, null, null) },
+    )
+
+    GestureSwitchCard(
+        icon = Icons.Rounded.TouchApp,
+        title = "주소창 롱프레스 후 위로 스와이프 시 AI 대화 실행",
+        subtitle = "주소창을 길게 누른 뒤(진동 피드백) 위로 스와이프하면 현재 URL이 채워진 AI 대화창 실행",
+        checked = prefs.longPressSwipeUpAiChatEnabled,
+        unifiedRadius = unifiedRadius,
+        testTag = "toggle_long_press_ai_chat",
+        onCheckedChange = { onUpdateGestureSettings(null, null, null, null, null, null, it) },
     )
 
     GestureSwitchCard(
@@ -84,7 +95,7 @@ fun GesturesSettingsPage(
         checked = prefs.swipeLeftRightTabSwitch,
         unifiedRadius = unifiedRadius,
         testTag = "toggle_swipe_lr_tabs",
-        onCheckedChange = { onUpdateGestureSettings(null, null, null, it, null, null) },
+        onCheckedChange = { onUpdateGestureSettings(null, null, null, it, null, null, null) },
     )
 
     GestureActionSelectorCard(
@@ -102,7 +113,7 @@ fun GesturesSettingsPage(
         unifiedRadius = unifiedRadius,
         innerRadius = innerRadius,
         onSelectAction = { action ->
-            onUpdateGestureSettings(null, action, null, null, null, null)
+            onUpdateGestureSettings(null, action, null, null, null, null, null)
         },
     )
 
@@ -121,7 +132,7 @@ fun GesturesSettingsPage(
         unifiedRadius = unifiedRadius,
         innerRadius = innerRadius,
         onSelectAction = { action ->
-            onUpdateGestureSettings(null, null, action, null, null, null)
+            onUpdateGestureSettings(null, null, action, null, null, null, null)
         },
     )
 
@@ -140,7 +151,7 @@ fun GesturesSettingsPage(
         unifiedRadius = unifiedRadius,
         innerRadius = innerRadius,
         onSelectAction = { action ->
-            onUpdateGestureSettings(null, null, null, null, action, null)
+            onUpdateGestureSettings(null, null, null, null, action, null, null)
         },
     )
 
@@ -178,7 +189,7 @@ fun GesturesSettingsPage(
         )
         Slider(
             value = prefs.gestureSensitivityDp,
-            onValueChange = { onUpdateGestureSettings(null, null, null, null, null, it) },
+            onValueChange = { onUpdateGestureSettings(null, null, null, null, null, it, null) },
             valueRange = 20f..64f,
             colors = SliderDefaults.colors(
                 thumbColor = IceCyan,
