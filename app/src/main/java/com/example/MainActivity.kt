@@ -9,6 +9,7 @@ import android.content.Intent
 import android.graphics.Bitmap
 import android.graphics.Canvas
 import android.net.Uri
+import android.os.Build
 import android.os.Bundle
 import android.os.Environment
 import android.os.Message
@@ -36,6 +37,7 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.Spring
+import androidx.compose.animation.core.animateDpAsState
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
@@ -78,6 +80,7 @@ import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.blur
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.TransformOrigin
@@ -1335,10 +1338,24 @@ private fun MyBrowserRootScreen(
             label = "browser_push_parallax",
         )
 
+        // Animated backdrop blur on Android 12+ when AI Chat modal is expanded
+        val aiModalBackdropBlur by animateDpAsState(
+            targetValue = if (activeOverlay == PushOverlay.AI_CHAT) 10.dp else 0.dp,
+            animationSpec = tween(durationMillis = 220, easing = FastOutSlowInEasing),
+            label = "ai_modal_backdrop_blur",
+        )
+
         // 1. Browser Viewport + Floating Bar + Quick-Toggle Dropdown Layer
         Box(
             modifier = Modifier
                 .fillMaxSize()
+                .then(
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S && aiModalBackdropBlur > 0.dp) {
+                        Modifier.blur(aiModalBackdropBlur)
+                    } else {
+                        Modifier
+                    }
+                )
                 .graphicsLayer {
                     translationX = -size.width * 0.25f * parallaxProgress
                 },
@@ -1976,16 +1993,16 @@ private fun MyBrowserRootScreen(
             )
         }
 
-        // 4.5 Bottom-Anchored Modal Expansion from Address Bar: Liquid Glass AI Chat
+        // 4.5 Physical Bottom-Origin Modal Expansion from Address Bar: Liquid Glass AI Chat
         AnimatedVisibility(
             visible = activeOverlay == PushOverlay.AI_CHAT,
-            enter = fadeIn(animationSpec = tween(durationMillis = 180)),
-            exit = fadeOut(animationSpec = tween(durationMillis = 150)),
+            enter = fadeIn(animationSpec = tween(durationMillis = 220)),
+            exit = fadeOut(animationSpec = tween(durationMillis = 170)),
         ) {
             Box(
                 modifier = Modifier
                     .fillMaxSize()
-                    .background(Color.Black.copy(alpha = 0.52f))
+                    .background(Color.Black.copy(alpha = 0.56f))
                     .pointerInput(Unit) {
                         detectTapGestures(onTap = { activeOverlay = PushOverlay.NONE })
                     }
@@ -1999,32 +2016,52 @@ private fun MyBrowserRootScreen(
         ) {
             AnimatedVisibility(
                 visible = activeOverlay == PushOverlay.AI_CHAT,
-                enter = expandVertically(
+                enter = slideInVertically(
+                    initialOffsetY = { fullHeight -> (fullHeight * 0.72f).toInt() },
+                    animationSpec = spring(
+                        dampingRatio = 0.78f,
+                        stiffness = Spring.StiffnessLow,
+                    ),
+                ) + expandVertically(
                     expandFrom = Alignment.Bottom,
                     animationSpec = spring(
-                        dampingRatio = 0.85f,
-                        stiffness = Spring.StiffnessMediumLow,
+                        dampingRatio = 0.8f,
+                        stiffness = Spring.StiffnessLow,
                     ),
                 ) + scaleIn(
-                    initialScale = 0.92f,
+                    initialScale = 0.88f,
                     transformOrigin = TransformOrigin(0.5f, 1f),
                     animationSpec = spring(
-                        dampingRatio = 0.85f,
+                        dampingRatio = 0.82f,
+                        stiffness = Spring.StiffnessLow,
+                    ),
+                ) + fadeIn(animationSpec = tween(durationMillis = 180)),
+                exit = slideOutVertically(
+                    targetOffsetY = { fullHeight -> (fullHeight * 0.72f).toInt() },
+                    animationSpec = spring(
+                        dampingRatio = 0.84f,
                         stiffness = Spring.StiffnessMediumLow,
                     ),
-                ) + fadeIn(animationSpec = tween(durationMillis = 160)),
-                exit = shrinkVertically(
+                ) + shrinkVertically(
                     shrinkTowards = Alignment.Bottom,
-                    animationSpec = tween(durationMillis = 180),
+                    animationSpec = spring(
+                        dampingRatio = 0.84f,
+                        stiffness = Spring.StiffnessMediumLow,
+                    ),
                 ) + scaleOut(
-                    targetScale = 0.92f,
+                    targetScale = 0.88f,
                     transformOrigin = TransformOrigin(0.5f, 1f),
-                    animationSpec = tween(durationMillis = 180),
-                ) + fadeOut(animationSpec = tween(durationMillis = 140)),
+                    animationSpec = spring(
+                        dampingRatio = 0.84f,
+                        stiffness = Spring.StiffnessMediumLow,
+                    ),
+                ) + fadeOut(animationSpec = tween(durationMillis = 150)),
             ) {
                 AiChatSheet(
                     chatState = aiChatUiState,
                     activeProfile = prefs.activeAiProfile(),
+                    allProfiles = prefs.aiProfiles,
+                    connectionStatus = aiConnectionStatus,
                     unifiedRadius = prefs.barCornerRadiusDp.dp,
                     glassOpacity = prefs.glassOpacity,
                     topSafeAreaPaddingDp = prefs.topSafeAreaPaddingDp.dp,
@@ -2036,6 +2073,18 @@ private fun MyBrowserRootScreen(
                             messages = emptyList(),
                             errorMessage = null,
                         )
+                    },
+                    onSelectAiProfile = { profileId ->
+                        viewModel.selectAiProfile(profileId)
+                    },
+                    onSelectAiModel = { profileId, modelName ->
+                        viewModel.updateAiProfile(
+                            profileId = profileId,
+                            selectedModel = modelName,
+                        )
+                    },
+                    onRefreshModels = { profile ->
+                        viewModel.testConnectionAndFetchModels(profile)
                     },
                     onOpenAiSettings = {
                         openSettingsDirectlyToAi = true
