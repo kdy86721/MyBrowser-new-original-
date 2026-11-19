@@ -1,23 +1,26 @@
 package com.example
 
+import android.Manifest
 import android.annotation.SuppressLint
-import android.app.DownloadManager
+import android.app.Activity
 import android.content.ClipData
 import android.content.ClipboardManager
+import android.content.ComponentCallbacks2
 import android.content.Context
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.graphics.Bitmap
 import android.graphics.Canvas
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
-import android.os.Environment
 import android.os.Message
 import android.view.MotionEvent
 import android.view.View
 import android.view.ViewGroup
 import android.webkit.CookieManager
-import android.webkit.URLUtil
+import android.webkit.GeolocationPermissions
+import android.webkit.PermissionRequest
 import android.webkit.ValueCallback
 import android.webkit.WebChromeClient
 import android.webkit.WebResourceRequest
@@ -28,6 +31,7 @@ import android.webkit.WebView
 import android.webkit.WebViewClient
 import android.widget.FrameLayout
 import android.widget.Toast
+import androidx.core.content.ContextCompat
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -37,7 +41,6 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.Spring
-import androidx.compose.animation.core.animateDpAsState
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
@@ -80,7 +83,6 @@ import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.blur
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.TransformOrigin
@@ -137,6 +139,11 @@ import com.example.storage.BrowserStateStorage
 import com.example.ui.theme.IceCyan
 import com.example.ui.theme.MyBrowserTheme
 import com.example.ui.theme.ObsidianVoid
+import com.example.webview.BLOB_DOWNLOAD_JS_BRIDGE_NAME
+import com.example.webview.BlobDownloadBridge
+import com.example.webview.WebViewExternalNavigator
+import com.example.webview.WebViewWarmupPool
+import com.example.webview.dispatchWebViewDownload
 import androidx.lifecycle.viewModelScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -169,6 +176,10 @@ private enum class PushOverlay {
     SUMMARY,
     AI_CHAT,
 }
+
+private class NonObservableFloatRef(var value: Float = 0f)
+
+private const val MAX_LIVE_WEBVIEWS = 4
 
 class BrowserViewModel(
     private val core: BrowserCoreBridge = LocalKotlinCore(),
@@ -593,10 +604,12 @@ class MainActivity : ComponentActivity() {
 
     private var viewModelRef: BrowserViewModel? = null
     private var saveAllWebViewsHook: (() -> Unit)? = null
+    private var trimMemoryHook: ((Int) -> Unit)? = null
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
+        WebViewWarmupPool.schedulePrewarm(applicationContext)
 
         val legacyStateJson = getSharedPreferences(prefsName, MODE_PRIVATE)
             .getString(prefsKeyState, null)
@@ -621,6 +634,9 @@ class MainActivity : ComponentActivity() {
                     viewModel = browserViewModel,
                     onRegisterWebViewPersistenceHook = { hook ->
                         saveAllWebViewsHook = hook
+                    },
+                    onRegisterTrimMemoryHook = { hook ->
+                        trimMemoryHook = hook
                     },
                 )
             }
@@ -652,12 +668,23 @@ class MainActivity : ComponentActivity() {
         persistFullBrowserState()
         super.onSaveInstanceState(outState)
     }
+
+    @Suppress("DEPRECATION")
+    override fun onTrimMemory(level: Int) {
+        super.onTrimMemory(level)
+        if (level >= ComponentCallbacks2.TRIM_MEMORY_RUNNING_LOW ||
+            level == ComponentCallbacks2.TRIM_MEMORY_UI_HIDDEN
+        ) {
+            trimMemoryHook?.invoke(level)
+        }
+    }
 }
 
 @Composable
 private fun MyBrowserRootScreen(
     viewModel: BrowserViewModel,
     onRegisterWebViewPersistenceHook: ((() -> Unit)?) -> Unit = {},
+    onRegisterTrimMemoryHook: (((Int) -> Unit)?) -> Unit = {},
 ) {
     val context = LocalContext.current
     val activity = context as? ComponentActivity
@@ -694,9 +721,9 @@ private fun MyBrowserRootScreen(
     var findQuery by remember { mutableStateOf("") }
     var focusedPaneIndex by remember { mutableIntStateOf(0) }
 
-    // Scroll-to-pill state with accumulated >36px hysteresis
+    // Scroll-to-pill state with accumulated >36px hysteresis (non-observable ref avoids per-pixel snapshot churn)
     var rawScrollCollapsed by remember { mutableStateOf(false) }
-    var accumulatedScrollDeltaPx by remember { mutableFloatStateOf(0f) }
+    val scrollDeltaRef = remember { NonObservableFloatRef(0f) }
 
     var activeOverlay by remember { mutableStateOf(PushOverlay.NONE) }
     var openSettingsDirectlyToAi by remember { mutableStateOf(false) }
@@ -707,17 +734,57 @@ private fun MyBrowserRootScreen(
     var fullscreenVideoView by remember { mutableStateOf<View?>(null) }
     var fullscreenVideoCallback by remember { mutableStateOf<WebChromeClient.CustomViewCallback?>(null) }
 
-    // <input type="file"> chooser launcher (zero storage permissions needed)
+    // <input type="file"> chooser launcher via SAF (zero storage permissions needed; supports multiple & MIME types)
     var pendingFileCallback by remember { mutableStateOf<ValueCallback<Array<Uri>>?>(null) }
     val fileChooserLauncher = rememberLauncherForActivityResult(
-        contract = ActivityResultContracts.GetMultipleContents()
-    ) { uris ->
+        contract = ActivityResultContracts.StartActivityForResult()
+    ) { result ->
         val callback = pendingFileCallback
         pendingFileCallback = null
-        if (uris.isEmpty()) {
-            callback?.onReceiveValue(null)
+        val uris = if (result.resultCode == Activity.RESULT_OK) {
+            extractChosenFileUris(result.data)
         } else {
-            callback?.onReceiveValue(uris.toTypedArray())
+            null
+        }
+        callback?.onReceiveValue(uris)
+    }
+
+    // WebRTC / Media (camera, microphone, DRM) runtime permission launcher
+    var pendingWebPermissionRequest by remember { mutableStateOf<PermissionRequest?>(null) }
+    val mediaPermissionLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.RequestMultiplePermissions()
+    ) { grantMap ->
+        val request = pendingWebPermissionRequest
+        pendingWebPermissionRequest = null
+        if (request != null) {
+            val grantedResources = resolveGrantableWebResources(
+                context = context,
+                requestedResources = request.resources,
+                overrideGrantMap = grantMap,
+            )
+            runCatching {
+                if (grantedResources.isNotEmpty()) {
+                    request.grant(grantedResources.toTypedArray())
+                } else {
+                    request.deny()
+                }
+            }
+        }
+    }
+
+    // HTML5 Geolocation runtime permission launcher
+    var pendingGeolocationRequest by remember { mutableStateOf<Pair<String, GeolocationPermissions.Callback>?>(null) }
+    val geolocationPermissionLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.RequestMultiplePermissions()
+    ) { grantMap ->
+        val pending = pendingGeolocationRequest
+        pendingGeolocationRequest = null
+        if (pending != null) {
+            val granted = grantMap[Manifest.permission.ACCESS_FINE_LOCATION] == true ||
+                grantMap[Manifest.permission.ACCESS_COARSE_LOCATION] == true
+            runCatching {
+                pending.second.invoke(pending.first, granted, false)
+            }
         }
     }
 
@@ -735,6 +802,8 @@ private fun MyBrowserRootScreen(
     }
 
     val webViewPool = remember { mutableMapOf<String, WebView>() }
+    val tabLastUsedMs = remember { mutableMapOf<String, Long>() }
+    val tabScrollPositions = remember { mutableMapOf<String, Pair<Int, Int>>() }
     val tabThumbnails = remember { mutableStateMapOf<String, Bitmap>() }
 
     fun captureTabThumbnail(tabId: String, wv: WebView?): Bitmap? {
@@ -756,15 +825,111 @@ private fun MyBrowserRootScreen(
         return captured
     }
 
-    // Keep latest callbacks safe for long-lived WebChromeClient / WebViewClient closures
-    val onOpenFileChooser: (ValueCallback<Array<Uri>>?, String) -> Unit = { callback, mimeType ->
-        pendingFileCallback?.onReceiveValue(null)
-        pendingFileCallback = callback
+    fun saveWebViewSnapshot(tabId: String, wv: WebView) {
+        tabScrollPositions[tabId] = Pair(wv.scrollX, wv.scrollY)
         runCatching {
-            fileChooserLauncher.launch(mimeType)
-        }.onFailure {
+            val bundle = Bundle()
+            wv.saveState(bundle)
+            if (!bundle.isEmpty) {
+                viewModel.saveTabBundle(tabId, bundle)
+            }
+        }
+    }
+
+    fun evictBackgroundWebViews(visibleIds: Set<String>, maxLiveCount: Int) {
+        if (webViewPool.size <= maxLiveCount) return
+        val candidates = webViewPool.keys
+            .filter { it !in visibleIds }
+            .sortedBy { tabLastUsedMs[it] ?: 0L }
+        var toEvict = (webViewPool.size - maxLiveCount).coerceAtLeast(0)
+        for (tabId in candidates) {
+            if (toEvict <= 0) break
+            val wv = webViewPool.remove(tabId) ?: continue
+            saveWebViewSnapshot(tabId, wv)
+            destroyWebViewCleanly(wv)
+            toEvict--
+        }
+    }
+
+    // Keep latest callbacks safe for long-lived WebChromeClient / WebViewClient closures
+    val onOpenFileChooser: (ValueCallback<Array<Uri>>?, WebChromeClient.FileChooserParams?) -> Unit =
+        { callback, params ->
             pendingFileCallback?.onReceiveValue(null)
-            pendingFileCallback = null
+            pendingFileCallback = callback
+            val intent = buildFileChooserIntent(params)
+            val launched = runCatching {
+                fileChooserLauncher.launch(intent)
+                true
+            }.getOrDefault(false)
+            if (!launched) {
+                pendingFileCallback?.onReceiveValue(null)
+                pendingFileCallback = null
+                Toast.makeText(context, "파일 선택기를 열 수 없습니다.", Toast.LENGTH_SHORT).show()
+            }
+        }
+
+    val onWebPermissionRequest: (PermissionRequest) -> Unit = { request ->
+        val requested = request.resources ?: emptyArray()
+        val missingRuntimePerms = mutableListOf<String>()
+        if (PermissionRequest.RESOURCE_VIDEO_CAPTURE in requested &&
+            ContextCompat.checkSelfPermission(context, Manifest.permission.CAMERA) != PackageManager.PERMISSION_GRANTED
+        ) {
+            missingRuntimePerms += Manifest.permission.CAMERA
+        }
+        if (PermissionRequest.RESOURCE_AUDIO_CAPTURE in requested &&
+            ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED
+        ) {
+            missingRuntimePerms += Manifest.permission.RECORD_AUDIO
+        }
+
+        if (missingRuntimePerms.isEmpty()) {
+            val grantable = resolveGrantableWebResources(context, requested)
+            runCatching {
+                if (grantable.isNotEmpty()) {
+                    request.grant(grantable.toTypedArray())
+                } else {
+                    request.deny()
+                }
+            }
+        } else {
+            pendingWebPermissionRequest?.let { old -> runCatching { old.deny() } }
+            pendingWebPermissionRequest = request
+            runCatching {
+                mediaPermissionLauncher.launch(missingRuntimePerms.toTypedArray())
+            }.onFailure {
+                pendingWebPermissionRequest = null
+                runCatching { request.deny() }
+            }
+        }
+    }
+
+    val onGeolocationPrompt: (String, GeolocationPermissions.Callback) -> Unit = { origin, callback ->
+        val hasFine = ContextCompat.checkSelfPermission(
+            context,
+            Manifest.permission.ACCESS_FINE_LOCATION,
+        ) == PackageManager.PERMISSION_GRANTED
+        val hasCoarse = ContextCompat.checkSelfPermission(
+            context,
+            Manifest.permission.ACCESS_COARSE_LOCATION,
+        ) == PackageManager.PERMISSION_GRANTED
+        if (hasFine || hasCoarse) {
+            runCatching { callback.invoke(origin, true, false) }
+        } else {
+            pendingGeolocationRequest?.let { (oldOrigin, oldCb) ->
+                runCatching { oldCb.invoke(oldOrigin, false, false) }
+            }
+            pendingGeolocationRequest = origin to callback
+            runCatching {
+                geolocationPermissionLauncher.launch(
+                    arrayOf(
+                        Manifest.permission.ACCESS_FINE_LOCATION,
+                        Manifest.permission.ACCESS_COARSE_LOCATION,
+                    )
+                )
+            }.onFailure {
+                pendingGeolocationRequest = null
+                runCatching { callback.invoke(origin, false, false) }
+            }
         }
     }
 
@@ -788,23 +953,23 @@ private fun MyBrowserRootScreen(
 
     val onScrollDelta: (Int, Int, Boolean) -> Unit = { dy, scrollY, isScrollable ->
         if (scrollY <= 0 || !isScrollable) {
-            accumulatedScrollDeltaPx = 0f
+            scrollDeltaRef.value = 0f
             rawScrollCollapsed = false
         } else {
             val fdy = dy.toFloat()
-            if ((fdy > 0f && accumulatedScrollDeltaPx < 0f) ||
-                (fdy < 0f && accumulatedScrollDeltaPx > 0f)
+            if ((fdy > 0f && scrollDeltaRef.value < 0f) ||
+                (fdy < 0f && scrollDeltaRef.value > 0f)
             ) {
-                accumulatedScrollDeltaPx = fdy
+                scrollDeltaRef.value = fdy
             } else {
-                accumulatedScrollDeltaPx += fdy
+                scrollDeltaRef.value += fdy
             }
-            if (accumulatedScrollDeltaPx > 36f) {
+            if (scrollDeltaRef.value > 36f) {
                 rawScrollCollapsed = true
-                accumulatedScrollDeltaPx = 0f
-            } else if (accumulatedScrollDeltaPx < -36f) {
+                scrollDeltaRef.value = 0f
+            } else if (scrollDeltaRef.value < -36f) {
                 rawScrollCollapsed = false
-                accumulatedScrollDeltaPx = 0f
+                scrollDeltaRef.value = 0f
             }
         }
     }
@@ -815,6 +980,7 @@ private fun MyBrowserRootScreen(
             .map { it.id }
             .toSet()
         webViewPool.forEach { (tabId, wv) ->
+            tabScrollPositions[tabId] = Pair(wv.scrollX, wv.scrollY)
             if (tabId in nonIncognitoIds) {
                 runCatching {
                     val bundle = Bundle()
@@ -831,8 +997,17 @@ private fun MyBrowserRootScreen(
         onRegisterWebViewPersistenceHook {
             saveAllNonIncognitoWebViews()
         }
+        onRegisterTrimMemoryHook { _ ->
+            val currentSnap = viewModel.snapshotFlow.value
+            val keepIds = buildSet {
+                add(currentSnap.activeTabId)
+                currentSnap.secondaryTabId?.let { add(it) }
+            }
+            evictBackgroundWebViews(visibleIds = keepIds, maxLiveCount = keepIds.size.coerceAtLeast(1))
+        }
         onDispose {
             onRegisterWebViewPersistenceHook(null)
+            onRegisterTrimMemoryHook(null)
         }
     }
 
@@ -841,9 +1016,16 @@ private fun MyBrowserRootScreen(
         val observer = LifecycleEventObserver { _, event ->
             when (event) {
                 Lifecycle.Event.ON_RESUME -> {
-                    webViewPool.values.forEach { wv ->
-                        wv.onResume()
-                        wv.resumeTimers()
+                    val currentSnap = viewModel.snapshotFlow.value
+                    val visibleIds = buildSet {
+                        add(currentSnap.activeTabId)
+                        currentSnap.secondaryTabId?.let { add(it) }
+                    }
+                    webViewPool.forEach { (id, wv) ->
+                        if (id in visibleIds) {
+                            wv.onResume()
+                            wv.resumeTimers()
+                        }
                     }
                 }
                 Lifecycle.Event.ON_PAUSE -> {
@@ -866,13 +1048,17 @@ private fun MyBrowserRootScreen(
         }
     }
 
-    // Cleanly destroy closed tab WebViews & remove stale thumbnails to eliminate CPU/memory leaks
+    // Cleanly destroy closed tab WebViews & remove stale thumbnails/scroll state to eliminate CPU/memory leaks
     LaunchedEffect(snapshot.tabs) {
         val openIds = snapshot.tabs.map { it.id }.toSet()
-        val staleIds = (webViewPool.keys + tabThumbnails.keys).distinct().filter { it !in openIds }
+        val staleIds = (webViewPool.keys + tabThumbnails.keys + tabLastUsedMs.keys + tabScrollPositions.keys)
+            .distinct()
+            .filter { it !in openIds }
         staleIds.forEach { staleId ->
             viewModel.removeTabBundle(staleId)
             tabThumbnails.remove(staleId)
+            tabLastUsedMs.remove(staleId)
+            tabScrollPositions.remove(staleId)
             webViewPool.remove(staleId)?.let { wv ->
                 destroyWebViewCleanly(wv)
             }
@@ -883,7 +1069,13 @@ private fun MyBrowserRootScreen(
         onDispose {
             pendingFileCallback?.onReceiveValue(null)
             pendingFileCallback = null
+            pendingWebPermissionRequest?.let { runCatching { it.deny() } }
+            pendingWebPermissionRequest = null
+            pendingGeolocationRequest?.let { (origin, cb) -> runCatching { cb.invoke(origin, false, false) } }
+            pendingGeolocationRequest = null
             tabThumbnails.clear()
+            tabLastUsedMs.clear()
+            tabScrollPositions.clear()
             saveAllNonIncognitoWebViews()
             viewModel.persistConfigSync()
             webViewPool.values.forEach { wv ->
@@ -952,21 +1144,29 @@ private fun MyBrowserRootScreen(
         val focusedWebView = webViewPool[focusedTabId]
         val isCurrentUrlBookmarked = snapshot.bookmarks.any { it.url == focusedTab?.url }
 
-        // Pause hidden background tabs and resume visible pane tabs
+        // Pause hidden background tabs, resume visible pane tabs, and apply LRU eviction cap
         LaunchedEffect(snapshot.activeTabId, secondaryTab?.id, isDualPaneActive) {
+            val now = System.currentTimeMillis()
             val visibleIds = buildSet {
                 add(snapshot.activeTabId)
                 if (isDualPaneActive && secondaryTab != null) {
                     add(secondaryTab.id)
                 }
             }
+            visibleIds.forEach { id -> tabLastUsedMs[id] = now }
             webViewPool.forEach { (id, wv) ->
                 if (id in visibleIds) {
                     wv.onResume()
+                    wv.resumeTimers()
                 } else {
+                    tabScrollPositions[id] = Pair(wv.scrollX, wv.scrollY)
                     wv.onPause()
                 }
             }
+            evictBackgroundWebViews(
+                visibleIds = visibleIds,
+                maxLiveCount = maxOf(MAX_LIVE_WEBVIEWS, visibleIds.size),
+            )
         }
 
         val displaySnapshot = remember(snapshot, focusedTabId) {
@@ -1023,7 +1223,7 @@ private fun MyBrowserRootScreen(
                 isTabDrawerOpen = false
                 isGridTabSwitcherOpen = false
                 rawScrollCollapsed = false
-                accumulatedScrollDeltaPx = 0f
+                scrollDeltaRef.value = 0f
                 val nextSnap = viewModel.createTab(initialUrl = "about:blank", isIncognito = false)
                 val newTab = nextSnap.activeTab
                 if (newTab == null) {
@@ -1035,18 +1235,38 @@ private fun MyBrowserRootScreen(
                         tabId = newTab.id,
                         initialUrl = null, // WebViewTransport delivers the target URL / POST request
                         restoredBundle = null,
+                        restoredScrollPosition = null,
                         preferences = nextSnap.preferences,
                         isDesktopMode = newTab.isDesktopMode,
                         viewModel = viewModel,
                         onScrollDelta = onScrollDelta,
                         onOpenFileChooser = onOpenFileChooser,
-                        onCreateNewWindow = { msg -> createPopupHelper(context, viewModel, webViewPool, onScrollDelta, onOpenFileChooser, onShowFullscreenVideo, onHideFullscreenVideo, { focusedPaneIndex = 0 }, { id, wv -> captureTabThumbnail(id, wv) }, msg) },
+                        onPermissionRequest = onWebPermissionRequest,
+                        onGeolocationPrompt = onGeolocationPrompt,
+                        onCreateNewWindow = { msg ->
+                            createPopupHelper(
+                                context = context,
+                                viewModel = viewModel,
+                                webViewPool = webViewPool,
+                                tabLastUsedMs = tabLastUsedMs,
+                                onScrollDelta = onScrollDelta,
+                                onOpenFileChooser = onOpenFileChooser,
+                                onPermissionRequest = onWebPermissionRequest,
+                                onGeolocationPrompt = onGeolocationPrompt,
+                                onShowCustomView = onShowFullscreenVideo,
+                                onHideCustomView = onHideFullscreenVideo,
+                                onFocusPrimaryPane = { focusedPaneIndex = 0 },
+                                onCaptureThumbnail = { id, wv -> captureTabThumbnail(id, wv) },
+                                resultMsg = msg,
+                            )
+                        },
                         onCloseWindow = { wv -> closeWindowByWebView(wv, webViewPool, viewModel) },
                         onShowCustomView = onShowFullscreenVideo,
                         onHideCustomView = onHideFullscreenVideo,
                         onCaptureThumbnail = { wv -> captureTabThumbnail(newTab.id, wv) },
                     )
                     webViewPool[newTab.id] = popupWebView
+                    tabLastUsedMs[newTab.id] = System.currentTimeMillis()
                     transport.webView = popupWebView
                     runCatching { resultMsg.sendToTarget() }
                     true
@@ -1073,7 +1293,7 @@ private fun MyBrowserRootScreen(
                 isTabDrawerOpen = false
                 isQuickMenuOpen = false
                 rawScrollCollapsed = false
-                accumulatedScrollDeltaPx = 0f
+                scrollDeltaRef.value = 0f
             }
         }
 
@@ -1131,7 +1351,7 @@ private fun MyBrowserRootScreen(
             isFindInPageOpen = false
             isEditingAddress = false
             rawScrollCollapsed = false
-            accumulatedScrollDeltaPx = 0f
+            scrollDeltaRef.value = 0f
 
             val cleanUrl = currentUrl.trim()
             val cleanTitle = focusedTab?.title.orEmpty()
@@ -1265,7 +1485,7 @@ private fun MyBrowserRootScreen(
                         isFindInPageOpen = false
                         isEditingAddress = false
                         rawScrollCollapsed = false
-                        accumulatedScrollDeltaPx = 0f
+                        scrollDeltaRef.value = 0f
                         isGridTabSwitcherOpen = true
                     } else {
                         isGridTabSwitcherOpen = false
@@ -1296,7 +1516,7 @@ private fun MyBrowserRootScreen(
                     isTabDrawerOpen = false
                     isGridTabSwitcherOpen = false
                     rawScrollCollapsed = false
-                    accumulatedScrollDeltaPx = 0f
+                    scrollDeltaRef.value = 0f
                     focusedPaneIndex = 0
                     viewModel.createTab()
                 }
@@ -1304,7 +1524,7 @@ private fun MyBrowserRootScreen(
                     isTabDrawerOpen = false
                     isEditingAddress = false
                     rawScrollCollapsed = false
-                    accumulatedScrollDeltaPx = 0f
+                    scrollDeltaRef.value = 0f
                     isQuickMenuOpen = true
                 }
                 BrowserPreferences.GESTURE_BOOKMARK -> {
@@ -1323,8 +1543,8 @@ private fun MyBrowserRootScreen(
             }
         }
 
-        // Underlying browser parallax offset during horizontal Push Transitions (Settings, History, Summary)
-        val parallaxProgress by animateFloatAsState(
+        // Underlying browser parallax offset read strictly inside graphicsLayer (zero root recomposition per frame)
+        val parallaxProgressState = animateFloatAsState(
             targetValue = if (
                 activeOverlay == PushOverlay.SETTINGS ||
                 activeOverlay == PushOverlay.HISTORY ||
@@ -1338,26 +1558,12 @@ private fun MyBrowserRootScreen(
             label = "browser_push_parallax",
         )
 
-        // Animated backdrop blur on Android 12+ when AI Chat modal is expanded
-        val aiModalBackdropBlur by animateDpAsState(
-            targetValue = if (activeOverlay == PushOverlay.AI_CHAT) 10.dp else 0.dp,
-            animationSpec = tween(durationMillis = 220, easing = FastOutSlowInEasing),
-            label = "ai_modal_backdrop_blur",
-        )
-
-        // 1. Browser Viewport + Floating Bar + Quick-Toggle Dropdown Layer
+        // 1. Browser Viewport + Floating Bar + Quick-Toggle Dropdown Layer (strictly separated from blur/heavy overlays)
         Box(
             modifier = Modifier
                 .fillMaxSize()
-                .then(
-                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S && aiModalBackdropBlur > 0.dp) {
-                        Modifier.blur(aiModalBackdropBlur)
-                    } else {
-                        Modifier
-                    }
-                )
                 .graphicsLayer {
-                    translationX = -size.width * 0.25f * parallaxProgress
+                    translationX = -size.width * 0.25f * parallaxProgressState.value
                 },
         ) {
             Box(
@@ -1384,12 +1590,16 @@ private fun MyBrowserRootScreen(
                                 tab = primaryTab,
                                 preferences = prefs,
                                 webViewPool = webViewPool,
+                                tabLastUsedMs = tabLastUsedMs,
+                                consumeSavedScrollPosition = { id -> tabScrollPositions.remove(id) },
                                 viewModel = viewModel,
                                 isDualPane = true,
                                 isFocusedPane = focusedPaneIndex == 0,
                                 onPaneFocused = { focusedPaneIndex = 0 },
                                 onScrollDelta = onScrollDelta,
                                 onOpenFileChooser = onOpenFileChooser,
+                                onPermissionRequest = onWebPermissionRequest,
+                                onGeolocationPrompt = onGeolocationPrompt,
                                 onCreateNewWindow = onCreateNewWindowTab,
                                 onCloseWindow = { wv -> closeWindowByWebView(wv, webViewPool, viewModel) },
                                 onShowCustomView = onShowFullscreenVideo,
@@ -1414,12 +1624,16 @@ private fun MyBrowserRootScreen(
                                 tab = secondaryTab,
                                 preferences = prefs,
                                 webViewPool = webViewPool,
+                                tabLastUsedMs = tabLastUsedMs,
+                                consumeSavedScrollPosition = { id -> tabScrollPositions.remove(id) },
                                 viewModel = viewModel,
                                 isDualPane = true,
                                 isFocusedPane = focusedPaneIndex == 1,
                                 onPaneFocused = { focusedPaneIndex = 1 },
                                 onScrollDelta = onScrollDelta,
                                 onOpenFileChooser = onOpenFileChooser,
+                                onPermissionRequest = onWebPermissionRequest,
+                                onGeolocationPrompt = onGeolocationPrompt,
                                 onCreateNewWindow = onCreateNewWindowTab,
                                 onCloseWindow = { wv -> closeWindowByWebView(wv, webViewPool, viewModel) },
                                 onShowCustomView = onShowFullscreenVideo,
@@ -1438,12 +1652,16 @@ private fun MyBrowserRootScreen(
                             tab = primaryTab,
                             preferences = prefs,
                             webViewPool = webViewPool,
+                            tabLastUsedMs = tabLastUsedMs,
+                            consumeSavedScrollPosition = { id -> tabScrollPositions.remove(id) },
                             viewModel = viewModel,
                             isDualPane = false,
                             isFocusedPane = true,
                             onPaneFocused = { focusedPaneIndex = 0 },
                             onScrollDelta = onScrollDelta,
                             onOpenFileChooser = onOpenFileChooser,
+                            onPermissionRequest = onWebPermissionRequest,
+                            onGeolocationPrompt = onGeolocationPrompt,
                             onCreateNewWindow = onCreateNewWindowTab,
                             onCloseWindow = { wv -> closeWindowByWebView(wv, webViewPool, viewModel) },
                             onShowCustomView = onShowFullscreenVideo,
@@ -1506,7 +1724,7 @@ private fun MyBrowserRootScreen(
                         isTabDrawerOpen = false
                         isQuickMenuOpen = false
                         rawScrollCollapsed = false
-                        accumulatedScrollDeltaPx = 0f
+                        scrollDeltaRef.value = 0f
                         isEditingAddress = true
                     },
                     onExitAddressEdit = {
@@ -1543,7 +1761,7 @@ private fun MyBrowserRootScreen(
                                     isFindInPageOpen = false
                                     isEditingAddress = false
                                     rawScrollCollapsed = false
-                                    accumulatedScrollDeltaPx = 0f
+                                    scrollDeltaRef.value = 0f
                                     isGridTabSwitcherOpen = true
                                 } else {
                                     isGridTabSwitcherOpen = false
@@ -1555,7 +1773,7 @@ private fun MyBrowserRootScreen(
                                 isTabDrawerOpen = false
                                 isGridTabSwitcherOpen = false
                                 rawScrollCollapsed = false
-                                accumulatedScrollDeltaPx = 0f
+                                scrollDeltaRef.value = 0f
                                 focusedPaneIndex = 0
                                 viewModel.createTab()
                             }
@@ -1588,7 +1806,7 @@ private fun MyBrowserRootScreen(
                         }
                         isTabDrawerOpen = false
                         rawScrollCollapsed = false
-                        accumulatedScrollDeltaPx = 0f
+                        scrollDeltaRef.value = 0f
                     },
                     onCloseTab = { tabId ->
                         viewModel.closeTab(tabId)
@@ -1599,13 +1817,13 @@ private fun MyBrowserRootScreen(
                         viewModel.createTab()
                         isTabDrawerOpen = false
                         rawScrollCollapsed = false
-                        accumulatedScrollDeltaPx = 0f
+                        scrollDeltaRef.value = 0f
                     },
                     onToggleQuickMenu = {
                         isTabDrawerOpen = false
                         isEditingAddress = false
                         rawScrollCollapsed = false
-                        accumulatedScrollDeltaPx = 0f
+                        scrollDeltaRef.value = 0f
                         isQuickMenuOpen = !isQuickMenuOpen
                     },
                     onFindQueryChange = { q ->
@@ -1691,7 +1909,7 @@ private fun MyBrowserRootScreen(
                                 viewModel.setScrollToPillEnabled(nextScroll)
                                 if (!nextScroll) {
                                     rawScrollCollapsed = false
-                                    accumulatedScrollDeltaPx = 0f
+                                    scrollDeltaRef.value = 0f
                                 }
                             }
                             QuickToggleAction.DUAL_PANE -> {
@@ -1865,7 +2083,7 @@ private fun MyBrowserRootScreen(
                     viewModel.setScrollToPillEnabled(enabled)
                     if (!enabled) {
                         rawScrollCollapsed = false
-                        accumulatedScrollDeltaPx = 0f
+                        scrollDeltaRef.value = 0f
                     }
                 },
                 onToggleExpandBarOnAddressEdit = { enabled ->
@@ -2114,7 +2332,7 @@ private fun MyBrowserRootScreen(
                     }
                     isGridTabSwitcherOpen = false
                     rawScrollCollapsed = false
-                    accumulatedScrollDeltaPx = 0f
+                    scrollDeltaRef.value = 0f
                 },
                 onCloseTab = { tabId ->
                     viewModel.closeTab(tabId)
@@ -2125,7 +2343,7 @@ private fun MyBrowserRootScreen(
                     viewModel.createTab()
                     isGridTabSwitcherOpen = false
                     rawScrollCollapsed = false
-                    accumulatedScrollDeltaPx = 0f
+                    scrollDeltaRef.value = 0f
                 },
                 onCreateTabGroup = { title, tabIds, colorIndex ->
                     viewModel.createTabGroup(title = title, tabIds = tabIds, colorIndex = colorIndex)
@@ -2189,12 +2407,16 @@ private fun WebViewPane(
     tab: BrowserTabState,
     preferences: BrowserPreferences,
     webViewPool: MutableMap<String, WebView>,
+    tabLastUsedMs: MutableMap<String, Long>,
+    consumeSavedScrollPosition: (String) -> Pair<Int, Int>?,
     viewModel: BrowserViewModel,
     isDualPane: Boolean,
     isFocusedPane: Boolean,
     onPaneFocused: () -> Unit,
     onScrollDelta: (dy: Int, scrollY: Int, isScrollable: Boolean) -> Unit,
-    onOpenFileChooser: (ValueCallback<Array<Uri>>?, String) -> Unit,
+    onOpenFileChooser: (ValueCallback<Array<Uri>>?, WebChromeClient.FileChooserParams?) -> Unit,
+    onPermissionRequest: (PermissionRequest) -> Unit,
+    onGeolocationPrompt: (String, GeolocationPermissions.Callback) -> Unit,
     onCreateNewWindow: (Message) -> Boolean,
     onCloseWindow: (WebView?) -> Unit,
     onShowCustomView: (View, WebChromeClient.CustomViewCallback?) -> Unit,
@@ -2205,6 +2427,8 @@ private fun WebViewPane(
     val latestOnPaneFocused by rememberUpdatedState(onPaneFocused)
     val latestOnScrollDelta by rememberUpdatedState(onScrollDelta)
     val latestOnOpenFileChooser by rememberUpdatedState(onOpenFileChooser)
+    val latestOnPermissionRequest by rememberUpdatedState(onPermissionRequest)
+    val latestOnGeolocationPrompt by rememberUpdatedState(onGeolocationPrompt)
     val latestOnCreateNewWindow by rememberUpdatedState(onCreateNewWindow)
     val latestOnCloseWindow by rememberUpdatedState(onCloseWindow)
     val latestOnShowCustomView by rememberUpdatedState(onShowCustomView)
@@ -2240,19 +2464,27 @@ private fun WebViewPane(
             },
             update = { container ->
                 val targetWebView = webViewPool.getOrPut(tab.id) {
+                    tabLastUsedMs[tab.id] = System.currentTimeMillis()
                     createConfiguredWebView(
                         context = container.context,
                         tabId = tab.id,
                         initialUrl = tab.url,
                         restoredBundle = viewModel.getTabBundle(tab.id),
+                        restoredScrollPosition = consumeSavedScrollPosition(tab.id),
                         preferences = preferences,
                         isDesktopMode = tab.isDesktopMode,
                         viewModel = viewModel,
                         onScrollDelta = { dy, sy, scrollable ->
                             latestOnScrollDelta(dy, sy, scrollable)
                         },
-                        onOpenFileChooser = { cb, mime ->
-                            latestOnOpenFileChooser(cb, mime)
+                        onOpenFileChooser = { cb, params ->
+                            latestOnOpenFileChooser(cb, params)
+                        },
+                        onPermissionRequest = { req ->
+                            latestOnPermissionRequest(req)
+                        },
+                        onGeolocationPrompt = { origin, cb ->
+                            latestOnGeolocationPrompt(origin, cb)
                         },
                         onCreateNewWindow = { msg ->
                             latestOnCreateNewWindow(msg)
@@ -2316,8 +2548,11 @@ private fun createPopupHelper(
     context: Context,
     viewModel: BrowserViewModel,
     webViewPool: MutableMap<String, WebView>,
+    tabLastUsedMs: MutableMap<String, Long>,
     onScrollDelta: (Int, Int, Boolean) -> Unit,
-    onOpenFileChooser: (ValueCallback<Array<Uri>>?, String) -> Unit,
+    onOpenFileChooser: (ValueCallback<Array<Uri>>?, WebChromeClient.FileChooserParams?) -> Unit,
+    onPermissionRequest: (PermissionRequest) -> Unit,
+    onGeolocationPrompt: (String, GeolocationPermissions.Callback) -> Unit,
     onShowCustomView: (View, WebChromeClient.CustomViewCallback?) -> Unit,
     onHideCustomView: () -> Unit,
     onFocusPrimaryPane: () -> Unit,
@@ -2333,18 +2568,24 @@ private fun createPopupHelper(
         tabId = newTab.id,
         initialUrl = null,
         restoredBundle = null,
+        restoredScrollPosition = null,
         preferences = nextSnap.preferences,
         isDesktopMode = newTab.isDesktopMode,
         viewModel = viewModel,
         onScrollDelta = onScrollDelta,
         onOpenFileChooser = onOpenFileChooser,
+        onPermissionRequest = onPermissionRequest,
+        onGeolocationPrompt = onGeolocationPrompt,
         onCreateNewWindow = { nestedMsg ->
             createPopupHelper(
                 context = context,
                 viewModel = viewModel,
                 webViewPool = webViewPool,
+                tabLastUsedMs = tabLastUsedMs,
                 onScrollDelta = onScrollDelta,
                 onOpenFileChooser = onOpenFileChooser,
+                onPermissionRequest = onPermissionRequest,
+                onGeolocationPrompt = onGeolocationPrompt,
                 onShowCustomView = onShowCustomView,
                 onHideCustomView = onHideCustomView,
                 onFocusPrimaryPane = onFocusPrimaryPane,
@@ -2358,8 +2599,9 @@ private fun createPopupHelper(
         onCaptureThumbnail = { wv -> onCaptureThumbnail(newTab.id, wv) },
     )
     webViewPool[newTab.id] = popupWebView
+    tabLastUsedMs[newTab.id] = System.currentTimeMillis()
     transport.webView = popupWebView
-    resultMsg.sendToTarget()
+    runCatching { resultMsg.sendToTarget() }
     return true
 }
 
@@ -2375,6 +2617,7 @@ private fun closeWindowByWebView(
 
 private fun destroyWebViewCleanly(webView: WebView) {
     (webView.parent as? ViewGroup)?.removeView(webView)
+    runCatching { webView.removeJavascriptInterface(BLOB_DOWNLOAD_JS_BRIDGE_NAME) }
     webView.stopLoading()
     webView.onPause()
     webView.loadUrl("about:blank")
@@ -2487,39 +2730,117 @@ private fun extractDomPageSummary(
     }
 }
 
+private fun buildFileChooserIntent(params: WebChromeClient.FileChooserParams?): Intent {
+    val rawAcceptTypes = params?.acceptTypes
+        ?.mapNotNull { entry ->
+            entry.trim().takeIf { it.isNotEmpty() }
+        }
+        ?.flatMap { it.split(',') }
+        ?.map { it.trim() }
+        ?.filter { it.isNotEmpty() }
+        ?.distinct()
+        .orEmpty()
+
+    val validMimes = rawAcceptTypes.filter { it.contains('/') }
+    val primaryMime = if (validMimes.size == 1) validMimes.first() else "*/*"
+
+    return Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
+        addCategory(Intent.CATEGORY_OPENABLE)
+        type = primaryMime
+        if (validMimes.size > 1) {
+            putExtra(Intent.EXTRA_MIME_TYPES, validMimes.toTypedArray())
+        }
+        if (params?.mode == WebChromeClient.FileChooserParams.MODE_OPEN_MULTIPLE) {
+            putExtra(Intent.EXTRA_ALLOW_MULTIPLE, true)
+        }
+    }
+}
+
+private fun extractChosenFileUris(data: Intent?): Array<Uri>? {
+    if (data == null) return null
+    val clipData = data.clipData
+    if (clipData != null && clipData.itemCount > 0) {
+        val list = ArrayList<Uri>(clipData.itemCount)
+        for (i in 0 until clipData.itemCount) {
+            clipData.getItemAt(i)?.uri?.let { list.add(it) }
+        }
+        return if (list.isEmpty()) null else list.toTypedArray()
+    }
+    val singleUri = data.data
+    return if (singleUri != null) arrayOf(singleUri) else null
+}
+
+private fun resolveGrantableWebResources(
+    context: Context,
+    requestedResources: Array<String>?,
+    overrideGrantMap: Map<String, Boolean> = emptyMap(),
+): List<String> {
+    if (requestedResources.isNullOrEmpty()) return emptyList()
+    val granted = mutableListOf<String>()
+    for (resource in requestedResources) {
+        when (resource) {
+            PermissionRequest.RESOURCE_PROTECTED_MEDIA_ID -> {
+                granted += resource
+            }
+            PermissionRequest.RESOURCE_VIDEO_CAPTURE -> {
+                val ok = overrideGrantMap[Manifest.permission.CAMERA]
+                    ?: (ContextCompat.checkSelfPermission(context, Manifest.permission.CAMERA) ==
+                        PackageManager.PERMISSION_GRANTED)
+                if (ok) granted += resource
+            }
+            PermissionRequest.RESOURCE_AUDIO_CAPTURE -> {
+                val ok = overrideGrantMap[Manifest.permission.RECORD_AUDIO]
+                    ?: (ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) ==
+                        PackageManager.PERMISSION_GRANTED)
+                if (ok) granted += resource
+            }
+        }
+    }
+    return granted
+}
+
 @SuppressLint("SetJavaScriptEnabled")
 private fun createConfiguredWebView(
     context: Context,
     tabId: String,
     initialUrl: String?,
     restoredBundle: Bundle?,
+    restoredScrollPosition: Pair<Int, Int>?,
     preferences: BrowserPreferences,
     isDesktopMode: Boolean,
     viewModel: BrowserViewModel,
     onScrollDelta: (dy: Int, scrollY: Int, isScrollable: Boolean) -> Unit,
-    onOpenFileChooser: (ValueCallback<Array<Uri>>?, String) -> Unit,
+    onOpenFileChooser: (ValueCallback<Array<Uri>>?, WebChromeClient.FileChooserParams?) -> Unit,
+    onPermissionRequest: (PermissionRequest) -> Unit,
+    onGeolocationPrompt: (String, GeolocationPermissions.Callback) -> Unit,
     onCreateNewWindow: (Message) -> Boolean,
     onCloseWindow: (WebView?) -> Unit,
     onShowCustomView: (View, WebChromeClient.CustomViewCallback?) -> Unit,
     onHideCustomView: () -> Unit,
     onCaptureThumbnail: (WebView) -> Unit,
 ): WebView {
-    return WebView(context).apply {
+    var pendingScrollRestore = restoredScrollPosition
+
+    return WebViewWarmupPool.acquireOrCreate(context).apply {
         layoutParams = ViewGroup.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT,
             ViewGroup.LayoutParams.MATCH_PARENT,
         )
+        setLayerType(View.LAYER_TYPE_HARDWARE, null)
         setBackgroundColor(android.graphics.Color.parseColor("#090D16"))
 
         val targetWebView = this
-        CookieManager.getInstance().apply {
-            setAcceptCookie(true)
-            setAcceptThirdPartyCookies(targetWebView, true)
+        runCatching {
+            CookieManager.getInstance().apply {
+                setAcceptCookie(true)
+                setAcceptThirdPartyCookies(targetWebView, true)
+            }
         }
 
         settings.apply {
             domStorageEnabled = true
             databaseEnabled = true
+            setGeolocationEnabled(true)
             loadsImagesAutomatically = !preferences.imagesBlocked
             blockNetworkImage = preferences.imagesBlocked
             useWideViewPort = true
@@ -2531,6 +2852,9 @@ private fun createConfiguredWebView(
             javaScriptCanOpenWindowsAutomatically = true
             mixedContentMode = WebSettings.MIXED_CONTENT_COMPATIBILITY_MODE
             mediaPlaybackRequiresUserGesture = false
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                safeBrowsingEnabled = false
+            }
         }
 
         applyRuntimeWebSettings(
@@ -2539,6 +2863,11 @@ private fun createConfiguredWebView(
             isDesktopMode = isDesktopMode,
         )
 
+        runCatching {
+            removeJavascriptInterface(BLOB_DOWNLOAD_JS_BRIDGE_NAME)
+            addJavascriptInterface(BlobDownloadBridge(context), BLOB_DOWNLOAD_JS_BRIDGE_NAME)
+        }
+
         setOnScrollChangeListener { v, _, scrollY, _, oldScrollY ->
             val dy = scrollY - oldScrollY
             val isScrollable = v.canScrollVertically(1) || v.canScrollVertically(-1)
@@ -2546,8 +2875,9 @@ private fun createConfiguredWebView(
         }
 
         setDownloadListener { url, userAgent, contentDisposition, mimeType, _ ->
-            enqueueNativeDownload(
+            dispatchWebViewDownload(
                 context = context,
+                webView = targetWebView,
                 url = url,
                 userAgent = userAgent,
                 contentDisposition = contentDisposition,
@@ -2576,48 +2906,11 @@ private fun createConfiguredWebView(
                 request: WebResourceRequest?,
             ): Boolean {
                 val uri = request?.url ?: return false
-                val urlStr = uri.toString()
-                val scheme = uri.scheme?.lowercase().orEmpty()
-                if (scheme == "http" || scheme == "https" || scheme == "about" || scheme == "data" || scheme == "blob") {
-                    return false
-                }
-
-                // Safely parse intent://, tel:, mailto:, and external app schemes
-                val parsedIntent = runCatching {
-                    Intent.parseUri(urlStr, Intent.URI_INTENT_SCHEME).apply {
-                        addCategory(Intent.CATEGORY_BROWSABLE)
-                        component = null
-                        selector = null
-                    }
-                }.getOrNull()
-
-                if (parsedIntent != null) {
-                    val launched = runCatching {
-                        context.startActivity(parsedIntent)
-                    }.isSuccess
-                    if (launched) return true
-
-                    val fallbackUrl = parsedIntent.getStringExtra("browser_fallback_url")
-                    if (!fallbackUrl.isNullOrBlank() &&
-                        (fallbackUrl.startsWith("http://", ignoreCase = true) ||
-                            fallbackUrl.startsWith("https://", ignoreCase = true))
-                    ) {
-                        view?.loadUrl(fallbackUrl)
-                        return true
-                    }
-                } else {
-                    val fallbackLaunch = runCatching {
-                        context.startActivity(Intent(Intent.ACTION_VIEW, uri))
-                    }.isSuccess
-                    if (fallbackLaunch) return true
-                }
-
-                Toast.makeText(
-                    context,
-                    "이 링크를 열 수 있는 앱이 설치되어 있지 않습니다.",
-                    Toast.LENGTH_SHORT,
-                ).show()
-                return true
+                return WebViewExternalNavigator.handleUrl(
+                    context = context,
+                    webView = view,
+                    uri = uri,
+                )
             }
 
             override fun onPageStarted(view: WebView?, url: String?, favicon: Bitmap?) {
@@ -2665,6 +2958,15 @@ private fun createConfiguredWebView(
                 )
                 viewModel.recordVisit(resolved, title)
                 if (view != null) {
+                    val savedPos = pendingScrollRestore
+                    if (savedPos != null) {
+                        pendingScrollRestore = null
+                        if (savedPos.first > 0 || savedPos.second > 0) {
+                            view.post {
+                                runCatching { view.scrollTo(savedPos.first, savedPos.second) }
+                            }
+                        }
+                    }
                     onCaptureThumbnail(view)
                     val isIncognito = viewModel.snapshotFlow.value.tabs
                         .firstOrNull { it.id == tabId }
@@ -2730,14 +3032,25 @@ private fun createConfiguredWebView(
                 filePathCallback: ValueCallback<Array<Uri>>?,
                 fileChooserParams: FileChooserParams?,
             ): Boolean {
-                val rawAccept = fileChooserParams
-                    ?.acceptTypes
-                    ?.firstOrNull { it.contains('/') }
-                    ?.trim()
-                    ?.takeIf { it.isNotEmpty() }
-                    ?: "*/*"
-                onOpenFileChooser(filePathCallback, rawAccept)
+                onOpenFileChooser(filePathCallback, fileChooserParams)
                 return true
+            }
+
+            override fun onPermissionRequest(request: PermissionRequest?) {
+                if (request != null) {
+                    onPermissionRequest(request)
+                }
+            }
+
+            override fun onGeolocationPermissionsShowPrompt(
+                origin: String?,
+                callback: GeolocationPermissions.Callback?,
+            ) {
+                if (!origin.isNullOrBlank() && callback != null) {
+                    onGeolocationPrompt(origin, callback)
+                } else {
+                    callback?.invoke(origin.orEmpty(), false, false)
+                }
             }
 
             override fun onShowCustomView(view: View?, callback: CustomViewCallback?) {
@@ -2768,60 +3081,12 @@ private fun createConfiguredWebView(
                 isLoading = false,
                 progress = 100,
             )
-        } else if (!initialUrl.isNullOrBlank()) {
-            loadUrl(initialUrl)
+        } else {
+            pendingScrollRestore = null
+            if (!initialUrl.isNullOrBlank()) {
+                loadUrl(initialUrl)
+            }
         }
-    }
-}
-
-private fun enqueueNativeDownload(
-    context: Context,
-    url: String,
-    userAgent: String?,
-    contentDisposition: String?,
-    mimeType: String?,
-) {
-    val parsedUri = runCatching { Uri.parse(url) }.getOrNull()
-    val scheme = parsedUri?.scheme?.lowercase().orEmpty()
-    if (parsedUri == null || (scheme != "http" && scheme != "https")) {
-        Toast.makeText(context, "지원되지 않는 다운로드 주소입니다.", Toast.LENGTH_SHORT).show()
-        return
-    }
-
-    val fileName = URLUtil.guessFileName(url, contentDisposition, mimeType)
-    val downloadManager = context.getSystemService(Context.DOWNLOAD_SERVICE) as? DownloadManager
-    if (downloadManager == null) {
-        Toast.makeText(context, "다운로드 관리자를 사용할 수 없습니다.", Toast.LENGTH_SHORT).show()
-        return
-    }
-
-    val request = DownloadManager.Request(parsedUri).apply {
-        if (!mimeType.isNullOrBlank()) {
-            setMimeType(mimeType)
-        }
-        val cookie = CookieManager.getInstance().getCookie(url)
-        if (!cookie.isNullOrBlank()) {
-            addRequestHeader("Cookie", cookie)
-        }
-        if (!userAgent.isNullOrBlank()) {
-            addRequestHeader("User-Agent", userAgent)
-        }
-        setTitle(fileName)
-        setDescription(url)
-        setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED)
-        try {
-            setDestinationInExternalPublicDir(Environment.DIRECTORY_DOWNLOADS, fileName)
-        } catch (_: SecurityException) {
-            setDestinationInExternalFilesDir(context, Environment.DIRECTORY_DOWNLOADS, fileName)
-        }
-    }
-
-    runCatching {
-        downloadManager.enqueue(request)
-    }.onSuccess {
-        Toast.makeText(context, "다운로드 시작: $fileName", Toast.LENGTH_SHORT).show()
-    }.onFailure {
-        Toast.makeText(context, "다운로드를 시작할 수 없습니다.", Toast.LENGTH_SHORT).show()
     }
 }
 
@@ -2837,8 +3102,15 @@ private fun applyRuntimeWebSettings(
         blockNetworkImage = preferences.imagesBlocked
         useWideViewPort = true
         loadWithOverviewMode = true
-        val desiredUa = if (isDesktopMode) DESKTOP_USER_AGENT else null
-        if (userAgentString != desiredUa) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            safeBrowsingEnabled = false
+        }
+        val desiredUa = if (isDesktopMode) {
+            DESKTOP_USER_AGENT
+        } else {
+            WebViewWarmupPool.getCleanMobileUserAgent(webView.context, userAgentString)
+        }
+        if (!desiredUa.isNullOrBlank() && userAgentString != desiredUa) {
             userAgentString = desiredUa
         }
     }

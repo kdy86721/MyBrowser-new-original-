@@ -756,4 +756,19 @@ class ExampleUnitTest {
         assertEquals(0f, restored.getSnapshot().preferences.topSafeAreaPaddingDp, 0.001f)
         assertEquals(0f, restored.getSnapshot().preferences.bottomSafeAreaPaddingDp, 0.001f)
     }
+
+    @Test
+    fun `sanitizeMobileUserAgent strips wv and Version tokens for OAuth compatibility`() {
+        val rawWebViewUa =
+            "Mozilla/5.0 (Linux; Android 14; Pixel 8 Build/UP1A.231005.007; wv) " +
+                "AppleWebKit/537.36 (KHTML, like Gecko) Version/4.0 Chrome/131.0.6778.104 Mobile Safari/537.36"
+        val cleanUa = com.example.webview.WebViewWarmupPool.sanitizeMobileUserAgent(rawWebViewUa)
+        assertFalse(cleanUa.contains("; wv"))
+        assertFalse(cleanUa.contains("Version/4.0"))
+        assertEquals(
+            "Mozilla/5.0 (Linux; Android 14; Pixel 8 Build/UP1A.231005.007) " +
+                "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.6778.104 Mobile Safari/537.36",
+            cleanUa,
+        )
+    }
 }

@@ -494,23 +494,11 @@ fun FloatingControlBar(
                         }
                     }
 
-                    // 5. Continuous 360° Perimeter Loading Progress Indicator via drawWithCache & lambda reads
-                    val targetFraction = if (isLoading) (progress / 100f).coerceIn(0.06f, 1f) else 0f
-                    val animatedFractionState = animateFloatAsState(
-                        targetValue = if (isLoading) targetFraction else 1f,
-                        animationSpec = spring(dampingRatio = 0.9f, stiffness = 320f),
-                        label = "perimeter_progress_fraction",
-                    )
-                    val ringAlphaState = animateFloatAsState(
-                        targetValue = if (isLoading) 1f else 0f,
-                        animationSpec = tween(durationMillis = if (isLoading) 120 else 340),
-                        label = "perimeter_ring_alpha",
-                    )
-
-                    PerimeterLoadingRing(
+                    // 5. Continuous 360° Perimeter Loading Progress Indicator isolated in a leaf composable
+                    BarLoadingProgressOverlay(
+                        isLoading = isLoading,
+                        progress = progress,
                         cornerRadius = unifiedRadius,
-                        progressProvider = { animatedFractionState.value },
-                        alphaProvider = { ringAlphaState.value },
                         modifier = Modifier
                             .matchParentSize()
                             .testTag("perimeter_loading_ring"),
@@ -519,6 +507,33 @@ fun FloatingControlBar(
             }
         }
     }
+}
+
+@Composable
+private fun BarLoadingProgressOverlay(
+    isLoading: Boolean,
+    progress: Int,
+    cornerRadius: Dp,
+    modifier: Modifier = Modifier,
+) {
+    val targetFraction = if (isLoading) (progress / 100f).coerceIn(0.06f, 1f) else 0f
+    val animatedFractionState = animateFloatAsState(
+        targetValue = if (isLoading) targetFraction else 1f,
+        animationSpec = spring(dampingRatio = 0.9f, stiffness = 320f),
+        label = "perimeter_progress_fraction",
+    )
+    val ringAlphaState = animateFloatAsState(
+        targetValue = if (isLoading) 1f else 0f,
+        animationSpec = tween(durationMillis = if (isLoading) 120 else 340),
+        label = "perimeter_ring_alpha",
+    )
+
+    PerimeterLoadingRing(
+        cornerRadius = cornerRadius,
+        progressProvider = { animatedFractionState.value },
+        alphaProvider = { ringAlphaState.value },
+        modifier = modifier,
+    )
 }
 
 /**
@@ -1220,17 +1235,17 @@ private fun AddressCapsule(
     var targetVisualDragX by remember(isEditing) { mutableFloatStateOf(0f) }
     var targetVisualDragY by remember(isEditing) { mutableFloatStateOf(0f) }
 
-    val animatedDragX by animateFloatAsState(
+    val animatedDragXState = animateFloatAsState(
         targetValue = if (isEditing) 0f else targetVisualDragX,
         animationSpec = spring(dampingRatio = 0.78f, stiffness = 440f),
         label = "address_capsule_drag_offset_x",
     )
-    val animatedDragY by animateFloatAsState(
+    val animatedDragYState = animateFloatAsState(
         targetValue = if (isEditing) 0f else targetVisualDragY,
         animationSpec = spring(dampingRatio = 0.78f, stiffness = 460f),
         label = "address_capsule_drag_offset_y",
     )
-    val armedScale by animateFloatAsState(
+    val armedScaleState = animateFloatAsState(
         targetValue = if (!isEditing && isLongPressArmed) 1.025f else 1f,
         animationSpec = spring(dampingRatio = 0.72f, stiffness = 460f),
         label = "address_capsule_armed_scale",
@@ -1240,7 +1255,7 @@ private fun AddressCapsule(
     } else {
         0f
     }
-    val animatedStretch by animateFloatAsState(
+    val animatedStretchState = animateFloatAsState(
         targetValue = targetStretch,
         animationSpec = spring(dampingRatio = 0.78f, stiffness = 440f),
         label = "address_capsule_armed_stretch",
@@ -1281,29 +1296,33 @@ private fun AddressCapsule(
         }
     }
 
-    val capsuleShape = RoundedCornerShape(capsuleCornerRadius)
+    val capsuleShape = remember(capsuleCornerRadius) { RoundedCornerShape(capsuleCornerRadius) }
     val capsuleTintAlpha = (0.64f + glassOpacity * 0.65f).coerceIn(0.66f, 0.94f)
     val capsuleBaseTint = if (isIncognito) {
         Color(0xFF1A132B).copy(alpha = capsuleTintAlpha)
     } else {
         Color(0xFF0A111F).copy(alpha = capsuleTintAlpha)
     }
-    val capsuleSpecular = Brush.verticalGradient(
-        listOf(
-            Color.White.copy(alpha = (glassOpacity * 0.85f).coerceIn(0.05f, 0.35f)),
-            Color.White.copy(alpha = 0.03f),
+    val capsuleSpecular = remember(glassOpacity) {
+        Brush.verticalGradient(
+            listOf(
+                Color.White.copy(alpha = (glassOpacity * 0.85f).coerceIn(0.05f, 0.35f)),
+                Color.White.copy(alpha = 0.03f),
+            )
         )
-    )
-    val capsuleRimBrush = when {
-        isLongPressArmed && !isEditing -> Brush.verticalGradient(
-            listOf(IceCyan, Color(0xFF9E7BFF))
-        )
-        isEditing -> Brush.verticalGradient(
-            listOf(IceCyan.copy(alpha = 0.85f), IceCyan.copy(alpha = 0.35f))
-        )
-        else -> Brush.verticalGradient(
-            listOf(Color.White.copy(alpha = 0.34f), Color.White.copy(alpha = 0.10f))
-        )
+    }
+    val capsuleRimBrush = remember(isLongPressArmed, isEditing) {
+        when {
+            isLongPressArmed && !isEditing -> Brush.verticalGradient(
+                listOf(IceCyan, Color(0xFF9E7BFF))
+            )
+            isEditing -> Brush.verticalGradient(
+                listOf(IceCyan.copy(alpha = 0.85f), IceCyan.copy(alpha = 0.35f))
+            )
+            else -> Brush.verticalGradient(
+                listOf(Color.White.copy(alpha = 0.34f), Color.White.copy(alpha = 0.10f))
+            )
+        }
     }
     val rimWidth = if (isLongPressArmed && !isEditing) 1.25.dp else 0.5.dp
 
@@ -1311,10 +1330,12 @@ private fun AddressCapsule(
         modifier = modifier
             .graphicsLayer {
                 transformOrigin = TransformOrigin(0.5f, 1f)
-                translationX = animatedDragX
-                translationY = animatedDragY
-                scaleX = armedScale + animatedStretch * 0.03f
-                scaleY = armedScale + animatedStretch * 0.14f
+                translationX = animatedDragXState.value
+                translationY = animatedDragYState.value
+                val scale = armedScaleState.value
+                val stretch = animatedStretchState.value
+                scaleX = scale + stretch * 0.03f
+                scaleY = scale + stretch * 0.14f
             }
             .height(capsuleHeight)
             .defaultMinSize(minWidth = 48.dp, minHeight = 44.dp)

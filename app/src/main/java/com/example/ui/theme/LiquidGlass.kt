@@ -3,13 +3,12 @@ package com.example.ui.theme
 import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
-import androidx.compose.foundation.border
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxScope
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.getValue
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -23,6 +22,7 @@ import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.PathMeasure
 import androidx.compose.ui.graphics.Shape
 import androidx.compose.ui.graphics.StrokeCap
+import androidx.compose.ui.graphics.drawOutline
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
@@ -52,13 +52,15 @@ fun LiquidGlassSurface(
     val clampedSheen = glassOpacity.coerceIn(0.05f, 0.45f)
     val baseAlpha = (0.58f + clampedSheen * 0.72f).coerceIn(0.60f, 0.92f)
 
-    val baseTint = if (darkMode) {
-        Color(0xFF0A101C).copy(alpha = baseAlpha)
-    } else {
-        Color(0xFF101827).copy(alpha = baseAlpha)
+    val baseTint = remember(darkMode, baseAlpha) {
+        if (darkMode) {
+            Color(0xFF0A101C).copy(alpha = baseAlpha)
+        } else {
+            Color(0xFF101827).copy(alpha = baseAlpha)
+        }
     }
 
-    val topRimColor by animateColorAsState(
+    val topRimColorState = animateColorAsState(
         targetValue = if (isHighlighted) {
             accentColor.copy(alpha = 0.85f)
         } else {
@@ -68,7 +70,7 @@ fun LiquidGlassSurface(
         label = "liquid_glass_top_rim",
     )
 
-    val midRimColor by animateColorAsState(
+    val midRimColorState = animateColorAsState(
         targetValue = if (isHighlighted) {
             accentColor.copy(alpha = 0.34f)
         } else {
@@ -78,21 +80,15 @@ fun LiquidGlassSurface(
         label = "liquid_glass_mid_rim",
     )
 
-    val specularBrush = Brush.verticalGradient(
-        colorStops = arrayOf(
-            0.0f to Color.White.copy(alpha = clampedSheen),
-            0.48f to Color.White.copy(alpha = clampedSheen * 0.48f),
-            1.0f to Color.White.copy(alpha = clampedSheen * 0.26f),
+    val specularBrush = remember(clampedSheen) {
+        Brush.verticalGradient(
+            colorStops = arrayOf(
+                0.0f to Color.White.copy(alpha = clampedSheen),
+                0.48f to Color.White.copy(alpha = clampedSheen * 0.48f),
+                1.0f to Color.White.copy(alpha = clampedSheen * 0.26f),
+            )
         )
-    )
-
-    val rimLightBrush = Brush.verticalGradient(
-        colorStops = arrayOf(
-            0.0f to topRimColor,
-            0.45f to midRimColor,
-            1.0f to Color.White.copy(alpha = 0.06f),
-        )
-    )
+    }
 
     Box(
         modifier = modifier,
@@ -112,11 +108,28 @@ fun LiquidGlassSurface(
                 .clip(shape)
                 .background(baseTint)
                 .background(specularBrush)
-                .border(
-                    width = 0.5.dp,
-                    brush = rimLightBrush,
-                    shape = shape,
-                )
+                .drawWithCache {
+                    val outline = shape.createOutline(size, layoutDirection, this)
+                    val borderStroke = Stroke(width = 0.5.dp.toPx())
+                    val bottomRim = Color.White.copy(alpha = 0.06f)
+                    onDrawWithContent {
+                        drawContent()
+                        val rimBrush = Brush.verticalGradient(
+                            colorStops = arrayOf(
+                                0.0f to topRimColorState.value,
+                                0.45f to midRimColorState.value,
+                                1.0f to bottomRim,
+                            ),
+                            startY = 0f,
+                            endY = size.height,
+                        )
+                        drawOutline(
+                            outline = outline,
+                            brush = rimBrush,
+                            style = borderStroke,
+                        )
+                    }
+                }
         )
 
         // Razor-sharp foreground layer.

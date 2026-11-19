@@ -1,21 +1,60 @@
-# Add project specific ProGuard rules here.
-# You can control the set of applied configuration files using the
-# proguardFiles setting in build.gradle.
-#
-# For more details, see
-#   http://developer.android.com/guide/developing/tools/proguard.html
+# R8 / ProGuard optimization rules for MyBrowser(BM) (Pure AOSP / Zero-GMS)
 
-# If your project uses WebView with JS, uncomment the following
-# and specify the fully qualified class name to the JavaScript interface
-# class:
-#-keepclassmembers class fqcn.of.javascript.interface.for.webview {
-#   public *;
-#}
+-keepattributes *Annotation*,Signature,InnerClasses,EnclosingMethod,SourceFile,LineNumberTable
 
-# Uncomment this to preserve the line number information for
-# debugging stack traces.
-#-keepattributes SourceFile,LineNumberTable
+# --- WebView @JavascriptInterface bridges ---
+-keepclassmembers class * {
+    @android.webkit.JavascriptInterface <methods>;
+}
+-keep class com.example.webview.BlobDownloadBridge {
+    public *;
+}
 
-# If you keep the line number information, uncomment this to
-# hide the original source file name.
-#-renamesourcefileattribute SourceFile
+# --- WebView / WebChromeClient / WebViewClient callbacks ---
+-keepclassmembers class * extends android.webkit.WebViewClient {
+    public *;
+}
+-keepclassmembers class * extends android.webkit.WebChromeClient {
+    public *;
+}
+-keepclassmembers class * implements android.webkit.DownloadListener {
+    public *;
+}
+
+# --- kotlinx.serialization (all @Serializable models, serializers & companions) ---
+-keepattributes RuntimeVisibleAnnotations,AnnotationDefault
+-dontnote kotlinx.serialization.AnnotationsKt
+
+-keepclassmembers class kotlinx.serialization.json.** {
+    *** Companion;
+}
+-keepclasseswithmembers class kotlinx.serialization.json.** {
+    kotlinx.serialization.KSerializer serializer(...);
+}
+-keep,includedescriptorclasses class com.example.**$$serializer { *; }
+-keepclassmembers class com.example.** {
+    *** Companion;
+}
+-keepclasseswithmembers class com.example.** {
+    kotlinx.serialization.KSerializer serializer(...);
+}
+-keep @kotlinx.serialization.Serializable class com.example.** { *; }
+
+# --- Rust FFI-ready core boundary models & bridge ---
+-keep class com.example.core.BrowserCoreBridge { *; }
+-keep class com.example.core.** {
+    public *;
+}
+
+# --- AndroidX Webkit & Window (Foldable Layout) reflection-backed classes ---
+-keep class androidx.webkit.** { *; }
+-keep class androidx.window.** { *; }
+-dontwarn androidx.window.**
+-dontwarn androidx.webkit.**
+
+# --- Kotlin Coroutines ---
+-keepnames class kotlinx.coroutines.internal.MainDispatcherFactory {}
+-keepnames class kotlinx.coroutines.CoroutineExceptionHandler {}
+-keepclassmembers class kotlinx.coroutines.** {
+    volatile <fields>;
+}

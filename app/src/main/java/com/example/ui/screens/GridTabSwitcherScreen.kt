@@ -751,29 +751,32 @@ private fun TabPreviewGridCard(
         TabGroupAccentColors[it.colorIndex.coerceIn(0, TabGroupAccentColors.lastIndex)]
     }
 
+    val isPastCloseThreshold by remember(closeThresholdPx) {
+        androidx.compose.runtime.derivedStateOf { swipeCloseOffsetY.value <= -closeThresholdPx }
+    }
     val accentBorderColor = when {
-        swipeCloseOffsetY.value <= -closeThresholdPx -> CrimsonStop
+        isPastCloseThreshold -> CrimsonStop
         isActive -> IceCyan
         groupColor != null -> groupColor.copy(alpha = 0.65f)
         tab.isIncognito -> Color(0xFFA78BFA).copy(alpha = 0.45f)
         else -> Color.White.copy(alpha = 0.12f)
     }
-    val borderWidth = if (isActive || swipeCloseOffsetY.value <= -closeThresholdPx) 2.5.dp else 0.75.dp
+    val borderWidth = if (isActive || isPastCloseThreshold) 2.5.dp else 0.75.dp
     val headerBg = if (tab.isIncognito) {
         Color(0xFF1D1533).copy(alpha = 0.92f)
     } else {
         ObsidianElevated.copy(alpha = 0.90f)
     }
 
-    val dragProgress = (-swipeCloseOffsetY.value / closeThresholdPx).coerceIn(0f, 1.4f)
-
     Box(
         modifier = Modifier
             .fillMaxWidth()
             .graphicsLayer {
-                translationY = swipeCloseOffsetY.value
+                val offsetY = swipeCloseOffsetY.value
+                val dragProgress = (-offsetY / closeThresholdPx).coerceIn(0f, 1.4f)
+                translationY = offsetY
                 val fade = (dragProgress * 0.55f).coerceIn(0f, 0.85f)
-                alpha = if (isClosing) (1f - (-swipeCloseOffsetY.value / flyOutPx).coerceIn(0f, 1f)) else (1f - fade * 0.5f)
+                alpha = if (isClosing) (1f - (-offsetY / flyOutPx).coerceIn(0f, 1f)) else (1f - fade * 0.5f)
                 val scale = 1f - (dragProgress * 0.05f).coerceAtMost(0.08f)
                 scaleX = scale
                 scaleY = scale
@@ -993,17 +996,25 @@ private fun TabPreviewGridCard(
                 }
 
                 // Upward swipe-to-close overlay hint when lifting the card
-                if (dragProgress > 0.18f) {
-                    val readyToClose = swipeCloseOffsetY.value <= -closeThresholdPx
+                val showSwipeHint by remember(closeThresholdPx) {
+                    androidx.compose.runtime.derivedStateOf {
+                        (-swipeCloseOffsetY.value / closeThresholdPx) > 0.18f
+                    }
+                }
+                if (showSwipeHint) {
+                    val readyToClose = isPastCloseThreshold
                     Box(
                         modifier = Modifier
                             .fillMaxSize()
+                            .graphicsLayer {
+                                val progress = (-swipeCloseOffsetY.value / closeThresholdPx).coerceIn(0f, 1.4f)
+                                alpha = (progress / 1.0f).coerceIn(0.35f, 1f)
+                            }
                             .background(
                                 Brush.verticalGradient(
                                     colors = listOf(
                                         Color.Transparent,
-                                        (if (readyToClose) CrimsonStop else ObsidianVoid)
-                                            .copy(alpha = (dragProgress * 0.42f).coerceAtMost(0.55f)),
+                                        (if (readyToClose) CrimsonStop else ObsidianVoid).copy(alpha = 0.48f),
                                     )
                                 )
                             ),
