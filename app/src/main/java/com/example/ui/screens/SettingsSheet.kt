@@ -202,6 +202,7 @@ fun SettingsSheet(
         addCustomModel: String?,
         temperature: Float?,
         systemPrompt: String?,
+        providerSubtype: String?,
     ) -> Unit,
     onAddCustomAiProfile: (
         name: String,
@@ -263,10 +264,7 @@ fun SettingsSheet(
             modifier = Modifier
                 .widthIn(max = 680.dp)
                 .fillMaxSize()
-                .statusBarsPadding()
-                .navigationBarsPadding()
                 .imePadding()
-                .padding(horizontal = 20.dp, vertical = 14.dp)
                 .testTag("settings_sheet_content"),
         ) {
             AnimatedContent(
@@ -289,7 +287,6 @@ fun SettingsSheet(
                         foldablePosture = foldablePosture,
                         unifiedRadius = unifiedRadius,
                         onSelectCategory = { activeCategory = it },
-                        onDismiss = onDismiss,
                     )
                 } else {
                     SettingsSubPageContainer(
@@ -707,7 +704,6 @@ private fun TopLevelSettingsCategories(
     foldablePosture: FoldablePostureUiState,
     unifiedRadius: Dp,
     onSelectCategory: (SettingsCategory) -> Unit,
-    onDismiss: () -> Unit,
 ) {
     val prefs = snapshot.preferences
     val toolbar = prefs.toolbarConfig
@@ -715,43 +711,13 @@ private fun TopLevelSettingsCategories(
     Column(
         modifier = Modifier
             .fillMaxSize()
-            .verticalScroll(rememberScrollState()),
-        verticalArrangement = Arrangement.spacedBy(14.dp),
+            .verticalScroll(rememberScrollState())
+            .statusBarsPadding()
+            .navigationBarsPadding()
+            .padding(horizontal = 16.dp, vertical = 12.dp)
+            .testTag("settings_category_list"),
+        verticalArrangement = Arrangement.spacedBy(12.dp),
     ) {
-        // Header
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(vertical = 6.dp),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.SpaceBetween,
-        ) {
-            Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
-                Text(
-                    text = "설정",
-                    style = MaterialTheme.typography.titleLarge,
-                    color = PureFrost,
-                )
-                Text(
-                    text = "MyBrowser(BM)",
-                    style = MaterialTheme.typography.labelMedium,
-                    color = IceCyan,
-                )
-            }
-
-            IconButton(
-                onClick = onDismiss,
-                modifier = Modifier.testTag("settings_close_button"),
-            ) {
-                Icon(
-                    imageVector = Icons.Rounded.Close,
-                    contentDescription = "설정 닫기",
-                    tint = PureFrost,
-                )
-            }
-        }
-
-        Spacer(Modifier.height(2.dp))
 
         CategoryRowCard(
             category = SettingsCategory.CUSTOMIZATION,
@@ -886,7 +852,13 @@ private fun SettingsSubPageContainer(
     trailingAction: @Composable () -> Unit = {},
     content: @Composable () -> Unit,
 ) {
-    Column(modifier = Modifier.fillMaxSize()) {
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .statusBarsPadding()
+            .navigationBarsPadding()
+            .padding(horizontal = 20.dp, vertical = 14.dp),
+    ) {
         Row(
             modifier = Modifier
                 .fillMaxWidth()

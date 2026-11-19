@@ -572,6 +572,7 @@ fun AiSettingsPage(
         addCustomModel: String?,
         temperature: Float?,
         systemPrompt: String?,
+        providerSubtype: String?,
     ) -> Unit,
     onAddCustomAiProfile: (
         name: String,
@@ -723,7 +724,7 @@ fun AiSettingsPage(
                     )
                     val modelLabel = profile.selectedModel.ifBlank { "모델 미선택 (연결 확인 필요)" }
                     Text(
-                        text = "모델: $modelLabel · ${cliTypeDisplayName(profile.cliType)}",
+                        text = "모델: $modelLabel · ${cliTypeDisplayName(profile)}",
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis,
                         style = MaterialTheme.typography.labelSmall,
@@ -778,6 +779,7 @@ private fun PerAiModelConfigSection(
         addCustomModel: String?,
         temperature: Float?,
         systemPrompt: String?,
+        providerSubtype: String?,
     ) -> Unit,
 ) {
     val cardShape = RoundedCornerShape(unifiedRadius)
@@ -875,7 +877,7 @@ private fun PerAiModelConfigSection(
                 onClick = {
                     val cleanKey = apiKeyDraft.trim()
                     val cleanEndpoint = endpointDraft.trim()
-                    onUpdateAiProfile(profile.id, null, cleanEndpoint, cleanKey, null, null, null, null)
+                    onUpdateAiProfile(profile.id, null, cleanEndpoint, cleanKey, null, null, null, null, null)
                     savedBanner = "API 키 저장됨 — 연결 및 모델을 확인합니다."
                     onTestConnectionAndFetchModels(
                         profile.copy(apiKey = cleanKey, endpointOrCommand = cleanEndpoint)
@@ -888,11 +890,28 @@ private fun PerAiModelConfigSection(
             }
         }
 
-        // Kimi CLI Endpoint Region Quick Chips (.ai / .cn)
+        // Kimi Mode Selector (Kimi API Global / China / Kimi Code / Local Kimi CLI Bridge)
         if (profile.cliType == AiCliProfile.CLI_TYPE_KIMI) {
+            val activeKimiSubtype = remember(profile.providerSubtype, endpointDraft) {
+                val explicit = profile.providerSubtype.trim().lowercase()
+                when {
+                    explicit == AiCliProfile.KIMI_SUBTYPE_CODE ||
+                        explicit == AiCliProfile.KIMI_SUBTYPE_CHINA ||
+                        explicit == AiCliProfile.KIMI_SUBTYPE_LOCAL ||
+                        explicit == AiCliProfile.KIMI_SUBTYPE_GLOBAL -> explicit
+                    endpointDraft.contains("api.kimi.com/coding", ignoreCase = true) ->
+                        AiCliProfile.KIMI_SUBTYPE_CODE
+                    endpointDraft.contains("127.0.0.1", ignoreCase = true) ||
+                        endpointDraft.contains("localhost", ignoreCase = true) ->
+                        AiCliProfile.KIMI_SUBTYPE_LOCAL
+                    endpointDraft.contains("moonshot.cn", ignoreCase = true) ->
+                        AiCliProfile.KIMI_SUBTYPE_CHINA
+                    else -> AiCliProfile.KIMI_SUBTYPE_GLOBAL
+                }
+            }
             Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
                 Text(
-                    text = "Kimi (Moonshot AI) 엔드포인트 빠른 선택",
+                    text = "Kimi 모드 및 엔드포인트 선택",
                     style = MaterialTheme.typography.labelSmall,
                     color = FrostSlate,
                 )
@@ -901,10 +920,28 @@ private fun PerAiModelConfigSection(
                     verticalArrangement = Arrangement.spacedBy(8.dp),
                 ) {
                     listOf(
-                        BrowserPreferences.KIMI_GLOBAL_ENDPOINT to "글로벌 (.ai)",
-                        BrowserPreferences.KIMI_CHINA_ENDPOINT to "중국 (.cn)",
-                    ).forEach { (url, label) ->
-                        val activeChip = endpointDraft.trim().equals(url, ignoreCase = true)
+                        Triple(
+                            AiCliProfile.KIMI_SUBTYPE_GLOBAL,
+                            BrowserPreferences.KIMI_GLOBAL_ENDPOINT,
+                            "키미 API (글로벌)",
+                        ),
+                        Triple(
+                            AiCliProfile.KIMI_SUBTYPE_CHINA,
+                            BrowserPreferences.KIMI_CHINA_ENDPOINT,
+                            "키미 API (중국)",
+                        ),
+                        Triple(
+                            AiCliProfile.KIMI_SUBTYPE_CODE,
+                            BrowserPreferences.KIMI_CODE_ENDPOINT,
+                            "키미 코드 (Kimi Code)",
+                        ),
+                        Triple(
+                            AiCliProfile.KIMI_SUBTYPE_LOCAL,
+                            BrowserPreferences.KIMI_LOCAL_CLI_ENDPOINT,
+                            "로컬 Kimi CLI 브릿지",
+                        ),
+                    ).forEach { (subtype, url, label) ->
+                        val activeChip = activeKimiSubtype == subtype
                         val chipShape = RoundedCornerShape(innerRadius)
                         Box(
                             modifier = Modifier
@@ -921,23 +958,52 @@ private fun PerAiModelConfigSection(
                                 .clickable {
                                     endpointDraft = url
                                     val cleanKey = apiKeyDraft.trim()
-                                    onUpdateAiProfile(profile.id, null, url, cleanKey, null, null, null, null)
-                                    savedBanner = "Kimi 엔드포인트가 '$label'로 변경되었습니다."
+                                    onUpdateAiProfile(
+                                        profile.id,
+                                        null,
+                                        url,
+                                        cleanKey,
+                                        null,
+                                        null,
+                                        null,
+                                        null,
+                                        subtype,
+                                    )
+                                    savedBanner = "Kimi 모드가 '$label'(으)로 변경되었습니다."
                                     onTestConnectionAndFetchModels(
-                                        profile.copy(endpointOrCommand = url, apiKey = cleanKey)
+                                        profile.copy(
+                                            providerSubtype = subtype,
+                                            endpointOrCommand = url,
+                                            apiKey = cleanKey,
+                                        )
                                     )
                                 }
                                 .padding(horizontal = 12.dp, vertical = 7.dp)
-                                .testTag("kimi_endpoint_chip_${label}"),
+                                .testTag("kimi_mode_chip_$subtype"),
                         ) {
                             Text(
-                                text = "$label · $url",
+                                text = label,
                                 style = MaterialTheme.typography.labelSmall,
                                 color = if (activeChip) PureFrost else FrostSlate,
                             )
                         }
                     }
                 }
+                val kimiModeHint = when (activeKimiSubtype) {
+                    AiCliProfile.KIMI_SUBTYPE_CODE ->
+                        "Kimi Code 모드: User-Agent: KimiCLI/1.0 헤더가 자동 전송되며 api.kimi.com/coding/v1을 사용합니다."
+                    AiCliProfile.KIMI_SUBTYPE_LOCAL ->
+                        "로컬 CLI 브릿지 모드: API 키 없이 127.0.0.1 로컬 포트 주소로 연결할 수 있습니다."
+                    AiCliProfile.KIMI_SUBTYPE_CHINA ->
+                        "키미 API (중국): api.moonshot.cn/v1 엔드포인트를 사용합니다."
+                    else ->
+                        "키미 API (글로벌): api.moonshot.ai/v1 엔드포인트를 사용합니다."
+                }
+                Text(
+                    text = kimiModeHint,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = IceCyan.copy(alpha = 0.85f),
+                )
             }
         }
 
@@ -980,7 +1046,7 @@ private fun PerAiModelConfigSection(
                 onClick = {
                     val cleanEndpoint = endpointDraft.trim()
                     val cleanKey = apiKeyDraft.trim()
-                    onUpdateAiProfile(profile.id, null, cleanEndpoint, cleanKey, null, null, null, null)
+                    onUpdateAiProfile(profile.id, null, cleanEndpoint, cleanKey, null, null, null, null, null)
                     savedBanner = "엔드포인트 저장됨 — 연결 및 모델을 확인합니다."
                     onTestConnectionAndFetchModels(
                         profile.copy(endpointOrCommand = cleanEndpoint, apiKey = cleanKey)
@@ -998,7 +1064,7 @@ private fun PerAiModelConfigSection(
             onClick = {
                 val cleanEndpoint = endpointDraft.trim()
                 val cleanKey = apiKeyDraft.trim()
-                onUpdateAiProfile(profile.id, null, cleanEndpoint, cleanKey, null, null, null, null)
+                onUpdateAiProfile(profile.id, null, cleanEndpoint, cleanKey, null, null, null, null, null)
                 onTestConnectionAndFetchModels(
                     profile.copy(endpointOrCommand = cleanEndpoint, apiKey = cleanKey)
                 )
@@ -1110,7 +1176,7 @@ private fun PerAiModelConfigSection(
                                 shape = chipShape,
                             )
                             .clickable {
-                                onUpdateAiProfile(profile.id, null, null, null, modelName, null, null, null)
+                                onUpdateAiProfile(profile.id, null, null, null, modelName, null, null, null, null)
                                 savedBanner = "모델이 '$modelName'(으)로 변경되었습니다."
                             }
                             .padding(horizontal = 12.dp, vertical = 8.dp)
@@ -1151,7 +1217,7 @@ private fun PerAiModelConfigSection(
                 onClick = {
                     val trimmed = customModelDraft.trim()
                     if (trimmed.isNotEmpty()) {
-                        onUpdateAiProfile(profile.id, null, null, null, null, trimmed, null, null)
+                        onUpdateAiProfile(profile.id, null, null, null, null, trimmed, null, null, null)
                         customModelDraft = ""
                         savedBanner = "모델 '$trimmed'이(가) 추가 및 선택되었습니다."
                     }
@@ -1184,7 +1250,7 @@ private fun PerAiModelConfigSection(
             Slider(
                 value = profile.temperature,
                 onValueChange = {
-                    onUpdateAiProfile(profile.id, null, null, null, null, null, it, null)
+                    onUpdateAiProfile(profile.id, null, null, null, null, null, it, null, null)
                 },
                 valueRange = 0f..1.5f,
                 colors = SliderDefaults.colors(
@@ -1221,7 +1287,7 @@ private fun PerAiModelConfigSection(
             )
             OutlinedButton(
                 onClick = {
-                    onUpdateAiProfile(profile.id, null, null, null, null, null, null, systemPromptDraft)
+                    onUpdateAiProfile(profile.id, null, null, null, null, null, null, systemPromptDraft, null)
                     savedBanner = "시스템 프롬프트가 저장되었습니다."
                 },
                 shape = RoundedCornerShape(innerRadius),
@@ -1411,6 +1477,18 @@ private fun aiOutlinedFieldColors() = OutlinedTextFieldDefaults.colors(
     unfocusedLabelColor = FrostSlate,
     cursorColor = IceCyan,
 )
+
+private fun cliTypeDisplayName(profile: AiCliProfile): String =
+    if (profile.cliType == AiCliProfile.CLI_TYPE_KIMI) {
+        when (profile.providerSubtype.lowercase()) {
+            AiCliProfile.KIMI_SUBTYPE_CODE -> "키미 코드 (Kimi Code)"
+            AiCliProfile.KIMI_SUBTYPE_CHINA -> "키미 API (중국)"
+            AiCliProfile.KIMI_SUBTYPE_LOCAL -> "로컬 Kimi CLI 브릿지"
+            else -> "키미 API (글로벌)"
+        }
+    } else {
+        cliTypeDisplayName(profile.cliType)
+    }
 
 private fun cliTypeDisplayName(cliType: String): String =
     when (cliType) {

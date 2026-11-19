@@ -9,6 +9,7 @@ import androidx.activity.compose.BackHandler
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.animateColorAsState
+import androidx.compose.animation.animateContentSize
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.animateDpAsState
@@ -109,6 +110,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.BiasAlignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.onFocusChanged
@@ -547,87 +549,102 @@ fun QuickToggleDropdownMenu(
         foldablePosture = foldablePosture,
     )
 
-    AnimatedVisibility(
-        visible = visible,
-        enter = fadeIn(tween(180)),
-        exit = fadeOut(tween(230)),
+    BoxWithConstraints(
+        modifier = Modifier
+            .fillMaxSize()
+            .navigationBarsPadding()
+            .imePadding(),
     ) {
-        BackHandler(enabled = visible) {
-            onDismiss()
+        val isTwoColumn = prefs.dropdownLayoutStyle == QuickToggleLayoutStyle.TWO_COLUMN_TILES
+        val desiredMenuWidth = if (isTwoColumn) 320.dp else 274.dp
+        val hingePad = if (foldablePosture.isUnfolded && foldablePosture.isVerticalHinge) {
+            maxOf(12.dp, prefs.foldableHingeAvoidanceDp.dp)
+        } else {
+            12.dp
         }
+        val menuWidth = minOf(desiredMenuWidth, (maxWidth - hingePad * 2).coerceAtLeast(220.dp))
+        val bottomClearance = (prefs.barBottomOffsetDp + prefs.barHeightDp + 10f).dp
 
-        BoxWithConstraints(
-            modifier = Modifier
-                .fillMaxSize()
-                .pointerInput(visible) {
-                    detectTapGestures(onTap = { onDismiss() })
-                }
-                .navigationBarsPadding()
-                .imePadding()
-                .testTag("quick_toggle_backdrop"),
+        // Anchor horizontally to the right edge of the active floating bar (where the gear sits)
+        val maxCap = if (foldablePosture.isUnfolded) 740.dp else 640.dp
+        val usableRowWidth = (maxWidth - hingePad * 2).coerceAtLeast(220.dp)
+        val barWidth = minOf(usableRowWidth * effectiveWidthFraction, maxCap)
+        val barLeftOffset = (usableRowWidth - barWidth) * ((effectiveHorizontalBias + 1f) / 2f)
+        val barRightEdge = hingePad + barLeftOffset + barWidth
+        val targetMenuLeft = (barRightEdge - menuWidth).coerceIn(
+            minimumValue = hingePad,
+            maximumValue = (maxWidth - menuWidth - hingePad).coerceAtLeast(hingePad),
+        )
+        val menuShape = RoundedCornerShape(unifiedRadius)
+
+        // Tap-consuming scrim backdrop animated independently so the menu AnimatedVisibility plays on open
+        AnimatedVisibility(
+            visible = visible,
+            enter = fadeIn(animationSpec = tween(durationMillis = 180)),
+            exit = fadeOut(animationSpec = tween(durationMillis = 150)),
         ) {
-            val isTwoColumn = prefs.dropdownLayoutStyle == QuickToggleLayoutStyle.TWO_COLUMN_TILES
-            val desiredMenuWidth = if (isTwoColumn) 320.dp else 274.dp
-            val hingePad = if (foldablePosture.isUnfolded && foldablePosture.isVerticalHinge) {
-                maxOf(12.dp, prefs.foldableHingeAvoidanceDp.dp)
-            } else {
-                12.dp
+            BackHandler(enabled = visible) {
+                onDismiss()
             }
-            val menuWidth = minOf(desiredMenuWidth, (maxWidth - hingePad * 2).coerceAtLeast(220.dp))
-            val bottomClearance = (prefs.barBottomOffsetDp + prefs.barHeightDp + 10f).dp
-
-            // Anchor horizontally to the right edge of the active floating bar (where the gear sits)
-            val maxCap = if (foldablePosture.isUnfolded) 740.dp else 640.dp
-            val usableRowWidth = (maxWidth - hingePad * 2).coerceAtLeast(220.dp)
-            val barWidth = minOf(usableRowWidth * effectiveWidthFraction, maxCap)
-            val barLeftOffset = (usableRowWidth - barWidth) * ((effectiveHorizontalBias + 1f) / 2f)
-            val barRightEdge = hingePad + barLeftOffset + barWidth
-            val targetMenuLeft = (barRightEdge - menuWidth).coerceIn(
-                minimumValue = hingePad,
-                maximumValue = (maxWidth - menuWidth - hingePad).coerceAtLeast(hingePad),
-            )
-
             Box(
                 modifier = Modifier
-                    .align(Alignment.BottomStart)
-                    .padding(start = targetMenuLeft, bottom = bottomClearance)
-                    .width(menuWidth)
+                    .fillMaxSize()
+                    .background(Color.Black.copy(alpha = 0.14f))
                     .pointerInput(Unit) {
-                        detectTapGestures { /* consume taps inside menu */ }
+                        detectTapGestures(onTap = { onDismiss() })
                     }
-                    .testTag("quick_toggle_dropdown_menu"),
+                    .testTag("quick_toggle_backdrop"),
+            )
+        }
+
+        // Outer Liquid Glass container expanding upward from the bottom gear anchor in lockstep with items
+        Box(
+            modifier = Modifier
+                .align(Alignment.BottomStart)
+                .padding(start = targetMenuLeft, bottom = bottomClearance)
+                .width(menuWidth),
+            contentAlignment = Alignment.BottomEnd,
+        ) {
+            AnimatedVisibility(
+                visible = visible,
+                enter = expandVertically(
+                    expandFrom = Alignment.Bottom,
+                    animationSpec = tween(durationMillis = 240, easing = FastOutSlowInEasing),
+                ) + fadeIn(animationSpec = tween(durationMillis = 180)),
+                exit = shrinkVertically(
+                    shrinkTowards = Alignment.Bottom,
+                    animationSpec = tween(durationMillis = 200, easing = FastOutSlowInEasing),
+                ) + fadeOut(animationSpec = tween(durationMillis = 150)),
             ) {
-                AnimatedVisibility(
-                    visible = visible,
-                    enter = expandVertically(
-                        expandFrom = Alignment.Bottom,
-                        animationSpec = tween(durationMillis = 220, easing = FastOutSlowInEasing),
-                    ) + scaleIn(
-                        initialScale = 0.88f,
-                        transformOrigin = TransformOrigin(1f, 1f),
-                        animationSpec = tween(durationMillis = 220, easing = FastOutSlowInEasing),
-                    ) + fadeIn(animationSpec = tween(durationMillis = 160)),
-                    exit = shrinkVertically(
-                        shrinkTowards = Alignment.Bottom,
-                        animationSpec = tween(durationMillis = 190, easing = FastOutSlowInEasing),
-                    ) + scaleOut(
-                        targetScale = 0.88f,
-                        transformOrigin = TransformOrigin(1f, 1f),
-                        animationSpec = tween(durationMillis = 190, easing = FastOutSlowInEasing),
-                    ) + fadeOut(animationSpec = tween(durationMillis = 140)),
+                LiquidGlassSurface(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .shadow(
+                            elevation = 24.dp,
+                            shape = menuShape,
+                            clip = false,
+                            ambientColor = Color.Black.copy(alpha = 0.55f),
+                            spotColor = Color.Black.copy(alpha = 0.72f),
+                        )
+                        .clip(menuShape)
+                        .animateContentSize(
+                            animationSpec = tween(durationMillis = 220, easing = FastOutSlowInEasing),
+                        )
+                        .pointerInput(Unit) {
+                            detectTapGestures { /* consume taps inside menu */ }
+                        }
+                        .testTag("quick_toggle_dropdown_menu"),
+                    shape = menuShape,
+                    shadowElevation = 0.dp,
+                    glassOpacity = (prefs.glassOpacity + 0.18f).coerceIn(0.30f, 0.45f),
                 ) {
-                    LiquidGlassSurface(
-                        modifier = Modifier.fillMaxWidth(),
-                        shape = RoundedCornerShape(unifiedRadius),
-                        shadowElevation = 24.dp,
-                        glassOpacity = (prefs.glassOpacity + 0.07f).coerceAtMost(0.45f),
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .background(ObsidianVoid.copy(alpha = 0.24f))
+                            .padding(8.dp),
+                        verticalArrangement = Arrangement.spacedBy(6.dp),
                     ) {
-                        Column(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .padding(8.dp),
-                            verticalArrangement = Arrangement.spacedBy(6.dp),
-                        ) {
                             val toggles = prefs.customQuickToggles
                             val totalStaggerItems = toggles.size + 1
                             val listModifier = Modifier
@@ -750,7 +767,6 @@ fun QuickToggleDropdownMenu(
                                     )
                                 }
                             }
-                        }
                     }
                 }
             }

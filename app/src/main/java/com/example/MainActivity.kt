@@ -91,10 +91,10 @@ import androidx.compose.ui.viewinterop.AndroidView
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.ViewModel
+import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.lifecycleScope
-import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.webkit.WebSettingsCompat
 import androidx.webkit.WebViewFeature
 import androidx.window.layout.FoldingFeature
@@ -128,14 +128,19 @@ import com.example.ui.screens.HistoryAndBookmarksSheet
 import com.example.ui.screens.PageSummarySheet
 import com.example.ui.screens.PageSummaryState
 import com.example.ui.screens.SettingsSheet
+import com.example.storage.BrowserStateStorage
 import com.example.ui.theme.IceCyan
 import com.example.ui.theme.MyBrowserTheme
 import com.example.ui.theme.ObsidianVoid
 import androidx.lifecycle.viewModelScope
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.drop
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
 import java.io.ByteArrayInputStream
@@ -162,6 +167,8 @@ private enum class PushOverlay {
 
 class BrowserViewModel(
     private val core: BrowserCoreBridge = LocalKotlinCore(),
+    private val storage: BrowserStateStorage? = null,
+    legacyStateJson: String? = null,
 ) : ViewModel() {
 
     val snapshotFlow: StateFlow<BrowserCoreSnapshot> = core.snapshotFlow
@@ -169,17 +176,58 @@ class BrowserViewModel(
     private val _aiConnectionStatus = MutableStateFlow<AiConnectionStatus?>(null)
     val aiConnectionStatusFlow: StateFlow<AiConnectionStatus?> = _aiConnectionStatus.asStateFlow()
 
-    // Retained per-tab WebView state Bundles across configuration / activity restarts
+    private val persistMutex = Mutex()
+
+    // Retained per-tab WebView state Bundles across configuration / activity restarts & process death
     private val savedTabBundles = mutableMapOf<String, Bundle>()
 
-    fun saveTabBundle(tabId: String, bundle: Bundle) {
-        savedTabBundles[tabId] = bundle
+    init {
+        val diskJson = storage?.loadConfigJson()
+        val initialJson = diskJson ?: legacyStateJson
+        if (!initialJson.isNullOrBlank()) {
+            core.importStateJson(initialJson)
+            if (diskJson == null) {
+                storage?.saveConfigJson(core.exportStateJson())
+            }
+        }
+        viewModelScope.launch(Dispatchers.IO) {
+            core.snapshotFlow.drop(1).collect { snap ->
+                persistMutex.withLock {
+                    storage?.saveConfigJson(core.exportStateJson())
+                    val nonIncognitoIds = snap.tabs
+                        .filterNot { it.isIncognito }
+                        .map { it.id }
+                        .toSet()
+                    storage?.pruneStaleTabStates(nonIncognitoIds)
+                }
+            }
+        }
     }
 
-    fun getTabBundle(tabId: String): Bundle? = savedTabBundles[tabId]
+    fun persistConfigSync() {
+        storage?.saveConfigJson(core.exportStateJson())
+    }
+
+    fun saveTabBundle(tabId: String, bundle: Bundle) {
+        val isIncognito = core.getSnapshot().tabs.firstOrNull { it.id == tabId }?.isIncognito == true
+        savedTabBundles[tabId] = bundle
+        if (!isIncognito) {
+            storage?.saveTabWebViewState(tabId, bundle)
+        }
+    }
+
+    fun getTabBundle(tabId: String): Bundle? {
+        savedTabBundles[tabId]?.let { return it }
+        val isIncognito = core.getSnapshot().tabs.firstOrNull { it.id == tabId }?.isIncognito == true
+        if (isIncognito) return null
+        return storage?.loadTabWebViewState(tabId)?.also { restored ->
+            savedTabBundles[tabId] = restored
+        }
+    }
 
     fun removeTabBundle(tabId: String) {
         savedTabBundles.remove(tabId)
+        storage?.deleteTabWebViewState(tabId)
     }
 
     fun restoreSerializedState(json: String?) {
@@ -212,9 +260,28 @@ class BrowserViewModel(
     fun ensureSecondaryTabForDualPane(): BrowserCoreSnapshot = core.ensureSecondaryTabForDualPane()
 
     fun closeTab(tabId: String): BrowserCoreSnapshot {
-        savedTabBundles.remove(tabId)
+        removeTabBundle(tabId)
         return core.closeTab(tabId)
     }
+
+    fun createTabGroup(
+        title: String,
+        tabIds: List<String>,
+        colorIndex: Int = 0,
+    ): BrowserCoreSnapshot = core.createTabGroup(
+        title = title,
+        tabIds = tabIds,
+        colorIndex = colorIndex,
+    )
+
+    fun addTabToGroup(groupId: String, tabId: String): BrowserCoreSnapshot =
+        core.addTabToGroup(groupId, tabId)
+
+    fun removeTabFromGroup(groupId: String, tabId: String): BrowserCoreSnapshot =
+        core.removeTabFromGroup(groupId, tabId)
+
+    fun ungroupTabGroup(groupId: String): BrowserCoreSnapshot =
+        core.ungroupTabGroup(groupId)
 
     fun updateTabNavigation(
         tabId: String,
@@ -419,6 +486,7 @@ class BrowserViewModel(
         addCustomModel: String? = null,
         temperature: Float? = null,
         systemPrompt: String? = null,
+        providerSubtype: String? = null,
     ) {
         core.updateAiProfile(
             profileId = profileId,
@@ -429,6 +497,7 @@ class BrowserViewModel(
             addCustomModel = addCustomModel,
             temperature = temperature,
             systemPrompt = systemPrompt,
+            providerSubtype = providerSubtype,
         )
     }
 
@@ -510,42 +579,72 @@ class MainActivity : ComponentActivity() {
     private val prefsKeyState = "core_state_json"
 
     private var viewModelRef: BrowserViewModel? = null
+    private var saveAllWebViewsHook: (() -> Unit)? = null
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
 
-        val savedStateJson = getSharedPreferences(prefsName, MODE_PRIVATE)
+        val legacyStateJson = getSharedPreferences(prefsName, MODE_PRIVATE)
             .getString(prefsKeyState, null)
+        val stateStorage = BrowserStateStorage(applicationContext)
+
+        // Synchronously restore saved state BEFORE the first Compose frame renders
+        val factory = object : ViewModelProvider.Factory {
+            @Suppress("UNCHECKED_CAST")
+            override fun <T : ViewModel> create(modelClass: Class<T>): T {
+                return BrowserViewModel(
+                    storage = stateStorage,
+                    legacyStateJson = legacyStateJson,
+                ) as T
+            }
+        }
+        val browserViewModel = ViewModelProvider(this, factory)[BrowserViewModel::class.java]
+        viewModelRef = browserViewModel
 
         setContent {
-            val browserViewModel: BrowserViewModel = viewModel()
-            viewModelRef = browserViewModel
-
-            LaunchedEffect(Unit) {
-                browserViewModel.restoreSerializedState(savedStateJson)
-            }
-
             MyBrowserTheme {
-                MyBrowserRootScreen(viewModel = browserViewModel)
+                MyBrowserRootScreen(
+                    viewModel = browserViewModel,
+                    onRegisterWebViewPersistenceHook = { hook ->
+                        saveAllWebViewsHook = hook
+                    },
+                )
             }
         }
     }
 
-    override fun onPause() {
-        super.onPause()
+    private fun persistFullBrowserState() {
+        saveAllWebViewsHook?.invoke()
         viewModelRef?.let { vm ->
+            vm.persistConfigSync()
             getSharedPreferences(prefsName, MODE_PRIVATE)
                 .edit()
                 .putString(prefsKeyState, vm.exportSerializedState())
                 .apply()
         }
     }
+
+    override fun onPause() {
+        persistFullBrowserState()
+        super.onPause()
+    }
+
+    override fun onStop() {
+        persistFullBrowserState()
+        super.onStop()
+    }
+
+    override fun onSaveInstanceState(outState: Bundle) {
+        persistFullBrowserState()
+        super.onSaveInstanceState(outState)
+    }
 }
 
 @Composable
 private fun MyBrowserRootScreen(
     viewModel: BrowserViewModel,
+    onRegisterWebViewPersistenceHook: ((() -> Unit)?) -> Unit = {},
 ) {
     val context = LocalContext.current
     val activity = context as? ComponentActivity
@@ -697,7 +796,34 @@ private fun MyBrowserRootScreen(
         }
     }
 
-    // Forward Activity lifecycle events to WebViews & persist WebView Bundles
+    fun saveAllNonIncognitoWebViews() {
+        val nonIncognitoIds = viewModel.snapshotFlow.value.tabs
+            .filterNot { it.isIncognito }
+            .map { it.id }
+            .toSet()
+        webViewPool.forEach { (tabId, wv) ->
+            if (tabId in nonIncognitoIds) {
+                runCatching {
+                    val bundle = Bundle()
+                    wv.saveState(bundle)
+                    if (!bundle.isEmpty) {
+                        viewModel.saveTabBundle(tabId, bundle)
+                    }
+                }
+            }
+        }
+    }
+
+    DisposableEffect(Unit) {
+        onRegisterWebViewPersistenceHook {
+            saveAllNonIncognitoWebViews()
+        }
+        onDispose {
+            onRegisterWebViewPersistenceHook(null)
+        }
+    }
+
+    // Forward Activity lifecycle events to WebViews & persist WebView Bundles across background death
     DisposableEffect(lifecycleOwner) {
         val observer = LifecycleEventObserver { _, event ->
             when (event) {
@@ -708,12 +834,15 @@ private fun MyBrowserRootScreen(
                     }
                 }
                 Lifecycle.Event.ON_PAUSE -> {
-                    webViewPool.forEach { (tabId, wv) ->
-                        val bundle = Bundle()
-                        wv.saveState(bundle)
-                        viewModel.saveTabBundle(tabId, bundle)
+                    saveAllNonIncognitoWebViews()
+                    webViewPool.values.forEach { wv ->
                         wv.onPause()
                     }
+                    viewModel.persistConfigSync()
+                }
+                Lifecycle.Event.ON_STOP -> {
+                    saveAllNonIncognitoWebViews()
+                    viewModel.persistConfigSync()
                 }
                 else -> Unit
             }
@@ -742,10 +871,9 @@ private fun MyBrowserRootScreen(
             pendingFileCallback?.onReceiveValue(null)
             pendingFileCallback = null
             tabThumbnails.clear()
-            webViewPool.forEach { (tabId, wv) ->
-                val bundle = Bundle()
-                wv.saveState(bundle)
-                viewModel.saveTabBundle(tabId, bundle)
+            saveAllNonIncognitoWebViews()
+            viewModel.persistConfigSync()
+            webViewPool.values.forEach { wv ->
                 destroyWebViewCleanly(wv)
             }
             webViewPool.clear()
@@ -1656,7 +1784,7 @@ private fun MyBrowserRootScreen(
                 onTestConnectionAndFetchModels = { profile ->
                     viewModel.testConnectionAndFetchModels(profile)
                 },
-                onUpdateAiProfile = { id, name, endpoint, apiKey, model, addModel, temp, prompt ->
+                onUpdateAiProfile = { id, name, endpoint, apiKey, model, addModel, temp, prompt, subtype ->
                     viewModel.updateAiProfile(
                         profileId = id,
                         name = name,
@@ -1666,6 +1794,7 @@ private fun MyBrowserRootScreen(
                         addCustomModel = addModel,
                         temperature = temp,
                         systemPrompt = prompt,
+                        providerSubtype = subtype,
                     )
                 },
                 onAddCustomAiProfile = { name, cliType, endpoint, apiKey, model, temp ->
@@ -1908,6 +2037,15 @@ private fun MyBrowserRootScreen(
                     isGridTabSwitcherOpen = false
                     rawScrollCollapsed = false
                     accumulatedScrollDeltaPx = 0f
+                },
+                onCreateTabGroup = { title, tabIds, colorIndex ->
+                    viewModel.createTabGroup(title = title, tabIds = tabIds, colorIndex = colorIndex)
+                },
+                onRemoveTabFromGroup = { groupId, tabId ->
+                    viewModel.removeTabFromGroup(groupId = groupId, tabId = tabId)
+                },
+                onUngroupTabGroup = { groupId ->
+                    viewModel.ungroupTabGroup(groupId)
                 },
                 onDismiss = {
                     isGridTabSwitcherOpen = false
@@ -2439,6 +2577,18 @@ private fun createConfiguredWebView(
                 viewModel.recordVisit(resolved, title)
                 if (view != null) {
                     onCaptureThumbnail(view)
+                    val isIncognito = viewModel.snapshotFlow.value.tabs
+                        .firstOrNull { it.id == tabId }
+                        ?.isIncognito == true
+                    if (!isIncognito) {
+                        runCatching {
+                            val bundle = Bundle()
+                            view.saveState(bundle)
+                            if (!bundle.isEmpty) {
+                                viewModel.saveTabBundle(tabId, bundle)
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -2515,11 +2665,21 @@ private fun createConfiguredWebView(
         }
 
         val restored = if (restoredBundle != null && !restoredBundle.isEmpty) {
-            restoreState(restoredBundle) != null
+            runCatching { restoreState(restoredBundle) != null }.getOrDefault(false)
         } else {
             false
         }
-        if (!restored && !initialUrl.isNullOrBlank()) {
+        if (restored) {
+            viewModel.updateTabNavigation(
+                tabId = tabId,
+                url = url.orEmpty().ifBlank { initialUrl.orEmpty() },
+                title = title.orEmpty(),
+                canGoBack = canGoBack(),
+                canGoForward = canGoForward(),
+                isLoading = false,
+                progress = 100,
+            )
+        } else if (!initialUrl.isNullOrBlank()) {
             loadUrl(initialUrl)
         }
     }

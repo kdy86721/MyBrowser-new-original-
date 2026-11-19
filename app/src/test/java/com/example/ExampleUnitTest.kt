@@ -1,5 +1,6 @@
 package com.example
 
+import com.example.core.AiChatTurn
 import com.example.core.AiCliHttpClient
 import com.example.core.AiCliProfile
 import com.example.core.BrowserPreferences
@@ -422,5 +423,261 @@ class ExampleUnitTest {
         assertTrue(restored.importStateJson(corrupted))
         assertEquals(restored.getSnapshot().tabs.first().id, restored.getSnapshot().activeTabId)
         assertNotNull(restored.getSnapshot().activeTab)
+    }
+
+    @Test
+    fun `kimi 4 modes, kimi code headers, url normalization, and all 7 ai cli specs are accurate`() {
+        val sampleTurn = listOf(AiChatTurn(isUser = true, text = "hello"))
+
+        // URL normalization prevents double slashes like //models
+        assertEquals(
+            "https://api.moonshot.ai/v1",
+            AiCliHttpClient.normalizeBaseUrl("  https://api.moonshot.ai/v1/  "),
+        )
+
+        // 1. Kimi API (Global & China) - no KimiCLI User-Agent
+        val kimiGlobal = AiCliProfile(
+            id = "kimi_cli",
+            name = "Kimi CLI",
+            cliType = AiCliProfile.CLI_TYPE_KIMI,
+            providerSubtype = AiCliProfile.KIMI_SUBTYPE_GLOBAL,
+            endpointOrCommand = "https://api.moonshot.ai/v1/",
+            apiKey = "sk-kimi-global",
+            selectedModel = "moonshot-v1-8k",
+        )
+        val (kimiGlobalModelsUrl, kimiGlobalHeaders) = AiCliHttpClient.buildModelsFetchSpec(
+            kimiGlobal,
+            kimiGlobal.endpointOrCommand,
+        )
+        assertEquals("https://api.moonshot.ai/v1/models", kimiGlobalModelsUrl)
+        assertEquals("Bearer sk-kimi-global", kimiGlobalHeaders["Authorization"])
+        assertFalse(kimiGlobalHeaders.containsKey("User-Agent"))
+
+        val kimiChina = kimiGlobal.copy(
+            providerSubtype = AiCliProfile.KIMI_SUBTYPE_CHINA,
+            endpointOrCommand = BrowserPreferences.KIMI_CHINA_ENDPOINT,
+        )
+        val (kimiChinaChatUrl, kimiChinaChatHeaders, _) = AiCliHttpClient.buildHttpSpec(
+            kimiChina,
+            kimiChina.endpointOrCommand,
+            sampleTurn,
+        )
+        assertEquals("https://api.moonshot.cn/v1/chat/completions", kimiChinaChatUrl)
+        assertFalse(kimiChinaChatHeaders.containsKey("User-Agent"))
+
+        // 2. Kimi Code - sends User-Agent: KimiCLI/1.0 + Bearer
+        val kimiCode = kimiGlobal.copy(
+            providerSubtype = AiCliProfile.KIMI_SUBTYPE_CODE,
+            endpointOrCommand = BrowserPreferences.KIMI_CODE_ENDPOINT,
+            apiKey = "sk-kimi-code",
+            selectedModel = "kimi-for-coding",
+        )
+        assertTrue(AiCliHttpClient.isKimiCodeMode(kimiCode, BrowserPreferences.KIMI_CODE_ENDPOINT))
+        val (kimiCodeModelsUrl, kimiCodeModelsHeaders) = AiCliHttpClient.buildModelsFetchSpec(
+            kimiCode,
+            kimiCode.endpointOrCommand,
+        )
+        assertEquals("https://api.kimi.com/coding/v1/models", kimiCodeModelsUrl)
+        assertEquals("Bearer sk-kimi-code", kimiCodeModelsHeaders["Authorization"])
+        assertEquals(AiCliHttpClient.KIMI_CODE_USER_AGENT, kimiCodeModelsHeaders["User-Agent"])
+
+        val (kimiCodeChatUrl, kimiCodeChatHeaders, _) = AiCliHttpClient.buildHttpSpec(
+            kimiCode,
+            kimiCode.endpointOrCommand,
+            sampleTurn,
+        )
+        assertEquals("https://api.kimi.com/coding/v1/chat/completions", kimiCodeChatUrl)
+        assertEquals(AiCliHttpClient.KIMI_CODE_USER_AGENT, kimiCodeChatHeaders["User-Agent"])
+
+        // Local Kimi CLI bridge allows blank key
+        val kimiLocal = kimiGlobal.copy(
+            providerSubtype = AiCliProfile.KIMI_SUBTYPE_LOCAL,
+            endpointOrCommand = BrowserPreferences.KIMI_LOCAL_CLI_ENDPOINT,
+            apiKey = "",
+        )
+        val (kimiLocalModelsUrl, kimiLocalHeaders) = AiCliHttpClient.buildModelsFetchSpec(
+            kimiLocal,
+            kimiLocal.endpointOrCommand,
+        )
+        assertEquals("http://127.0.0.1:8080/v1/models", kimiLocalModelsUrl)
+        assertFalse(kimiLocalHeaders.containsKey("Authorization"))
+
+        // 3. Gemini CLI (?key= query param for both /models and :generateContent)
+        val gemini = AiCliProfile(
+            id = "gemini_cli",
+            name = "Gemini CLI",
+            cliType = AiCliProfile.CLI_TYPE_GEMINI,
+            endpointOrCommand = "https://generativelanguage.googleapis.com/v1beta/models/",
+            apiKey = "gm-secret-key",
+            selectedModel = "gemini-2.5-flash",
+        )
+        val (geminiModelsUrl, _) = AiCliHttpClient.buildModelsFetchSpec(gemini, gemini.endpointOrCommand)
+        assertEquals(
+            "https://generativelanguage.googleapis.com/v1beta/models?key=gm-secret-key",
+            geminiModelsUrl,
+        )
+        val (geminiChatUrl, _, _) = AiCliHttpClient.buildHttpSpec(gemini, gemini.endpointOrCommand, sampleTurn)
+        assertEquals(
+            "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=gm-secret-key",
+            geminiChatUrl,
+        )
+
+        // 4. Claude CLI (x-api-key + anthropic-version: 2023-06-01)
+        val claude = AiCliProfile(
+            id = "claude_cli",
+            name = "Claude CLI",
+            cliType = AiCliProfile.CLI_TYPE_CLAUDE,
+            endpointOrCommand = "https://api.anthropic.com/v1/",
+            apiKey = "sk-ant-key",
+            selectedModel = "claude-sonnet-4-20250514",
+        )
+        val (claudeModelsUrl, claudeModelsHeaders) = AiCliHttpClient.buildModelsFetchSpec(claude, claude.endpointOrCommand)
+        assertEquals("https://api.anthropic.com/v1/models", claudeModelsUrl)
+        assertEquals("sk-ant-key", claudeModelsHeaders["x-api-key"])
+        assertEquals("2023-06-01", claudeModelsHeaders["anthropic-version"])
+        val (claudeChatUrl, claudeChatHeaders, _) = AiCliHttpClient.buildHttpSpec(claude, claude.endpointOrCommand, sampleTurn)
+        assertEquals("https://api.anthropic.com/v1/messages", claudeChatUrl)
+        assertEquals("sk-ant-key", claudeChatHeaders["x-api-key"])
+        assertEquals("2023-06-01", claudeChatHeaders["anthropic-version"])
+
+        // 5. Codex / OpenAI CLI
+        val openai = AiCliProfile(
+            id = "codex_cli",
+            name = "Codex / OpenAI CLI",
+            cliType = AiCliProfile.CLI_TYPE_OPENAI,
+            endpointOrCommand = "https://api.openai.com/v1/",
+            apiKey = "sk-openai-key",
+            selectedModel = "gpt-4o",
+        )
+        val (openaiModelsUrl, openaiHeaders) = AiCliHttpClient.buildModelsFetchSpec(openai, openai.endpointOrCommand)
+        assertEquals("https://api.openai.com/v1/models", openaiModelsUrl)
+        assertEquals("Bearer sk-openai-key", openaiHeaders["Authorization"])
+        val (openaiChatUrl, _, _) = AiCliHttpClient.buildHttpSpec(openai, openai.endpointOrCommand, sampleTurn)
+        assertEquals("https://api.openai.com/v1/chat/completions", openaiChatUrl)
+
+        // 6. Ollama Local (/api/tags & /api/chat, no API key required)
+        val ollama = AiCliProfile(
+            id = "ollama_local",
+            name = "Ollama (로컬)",
+            cliType = AiCliProfile.CLI_TYPE_OLLAMA,
+            endpointOrCommand = "http://127.0.0.1:11434/",
+            apiKey = "",
+            selectedModel = "llama3.2",
+        )
+        val (ollamaTagsUrl, ollamaHeaders) = AiCliHttpClient.buildModelsFetchSpec(ollama, ollama.endpointOrCommand)
+        assertEquals("http://127.0.0.1:11434/api/tags", ollamaTagsUrl)
+        assertTrue(ollamaHeaders.isEmpty())
+        val (ollamaChatUrl, _, _) = AiCliHttpClient.buildHttpSpec(ollama, ollama.endpointOrCommand, sampleTurn)
+        assertEquals("http://127.0.0.1:11434/api/chat", ollamaChatUrl)
+
+        // 7. Custom AI CLI
+        val custom = AiCliProfile(
+            id = "custom_cli",
+            name = "Custom Bridge",
+            cliType = AiCliProfile.CLI_TYPE_CUSTOM,
+            endpointOrCommand = "http://127.0.0.1:8080/v1/",
+            apiKey = "tok-123",
+            selectedModel = "custom-model",
+        )
+        val (customModelsUrl, customHeaders) = AiCliHttpClient.buildModelsFetchSpec(custom, custom.endpointOrCommand)
+        assertEquals("http://127.0.0.1:8080/v1/models", customModelsUrl)
+        assertEquals("Bearer tok-123", customHeaders["Authorization"])
+        val (customChatUrl, _, _) = AiCliHttpClient.buildHttpSpec(custom, custom.endpointOrCommand, sampleTurn)
+        assertEquals("http://127.0.0.1:8080/v1/chat/completions", customChatUrl)
+    }
+
+    @Test
+    fun `cold restart restores tabs, kimi subtype, api keys, and advances tab sequence safely`() {
+        val original = LocalKotlinCore(initialHomeUrl = "https://duckduckgo.com")
+        original.createTab("https://kotlinlang.org", activate = true)
+        val thirdSnap = original.createTab("https://rust-lang.org", activate = true)
+        val savedActiveId = thirdSnap.activeTabId
+        // Incognito tab should not survive cold restart
+        original.createTab("https://private.example.com", activate = false, isIncognito = true)
+
+        original.selectAiProfile("kimi_cli")
+        original.updateAiProfile(
+            profileId = "kimi_cli",
+            endpointOrCommand = BrowserPreferences.KIMI_CODE_ENDPOINT,
+            apiKey = "sk-kimi-persisted",
+            providerSubtype = AiCliProfile.KIMI_SUBTYPE_CODE,
+            addCustomModel = "kimi-for-coding",
+        )
+
+        val serialized = original.exportStateJson()
+
+        // Simulate fresh process after OS background kill
+        val coldRestarted = LocalKotlinCore()
+        assertTrue(coldRestarted.importStateJson(serialized))
+
+        val restoredSnap = coldRestarted.getSnapshot()
+        assertEquals(3, restoredSnap.tabs.size)
+        assertFalse(restoredSnap.tabs.any { it.isIncognito })
+        assertEquals(savedActiveId, restoredSnap.activeTabId)
+
+        val restoredKimi = restoredSnap.preferences.activeAiProfile()
+        assertEquals("kimi_cli", restoredKimi.id)
+        assertEquals(AiCliProfile.KIMI_SUBTYPE_CODE, restoredKimi.providerSubtype)
+        assertEquals(BrowserPreferences.KIMI_CODE_ENDPOINT, restoredKimi.endpointOrCommand)
+        assertEquals("sk-kimi-persisted", restoredKimi.apiKey)
+        assertEquals("kimi-for-coding", restoredKimi.selectedModel)
+
+        // Creating a new tab after cold restart MUST NOT duplicate any restored tab ID
+        val existingIds = restoredSnap.tabs.map { it.id }.toSet()
+        val afterNewTab = coldRestarted.createTab("https://example.org", activate = true)
+        assertEquals(4, afterNewTab.tabs.size)
+        assertEquals(4, afterNewTab.tabs.map { it.id }.distinct().size)
+        assertFalse(afterNewTab.activeTabId in existingIds)
+    }
+
+    @Test
+    fun `tab groups create, reassign, prune on tab close, ungroup, and survive json cold restart`() {
+        val core = LocalKotlinCore(initialHomeUrl = "https://duckduckgo.com")
+        val tab1 = core.getSnapshot().activeTabId
+        val tab2 = core.createTab("https://kotlinlang.org", activate = true).activeTabId
+        val tab3 = core.createTab("https://rust-lang.org", activate = true).activeTabId
+
+        val afterCreate = core.createTabGroup(
+            title = "개발 문서",
+            tabIds = listOf(tab2, tab3),
+            colorIndex = 2,
+        )
+        assertEquals(1, afterCreate.tabGroups.size)
+        val group1 = afterCreate.tabGroups.first()
+        assertEquals("개발 문서", group1.title)
+        assertEquals(2, group1.colorIndex)
+        assertEquals(listOf(tab2, tab3), group1.tabIds)
+
+        // Adding tab1 joins group1 cleanly
+        val afterAdd = core.addTabToGroup(group1.id, tab1)
+        assertEquals(listOf(tab2, tab3, tab1), afterAdd.tabGroups.first().tabIds)
+
+        // Removing tab2 leaves tab3 and tab1 in group1
+        val afterRemove = core.removeTabFromGroup(group1.id, tab2)
+        assertEquals(listOf(tab3, tab1), afterRemove.tabGroups.first().tabIds)
+
+        // Export & cold restart preserves tabGroups and advances tabGroupSequence
+        val exported = core.exportStateJson()
+        val restored = LocalKotlinCore()
+        assertTrue(restored.importStateJson(exported))
+        assertEquals(1, restored.getSnapshot().tabGroups.size)
+        assertEquals("개발 문서", restored.getSnapshot().tabGroups.first().title)
+        assertEquals(listOf(tab3, tab1), restored.getSnapshot().tabGroups.first().tabIds)
+
+        // Creating a second group after restore never collides with restored group ID
+        val secondGroupSnap = restored.createTabGroup("읽기 목록", listOf(tab2), colorIndex = 1)
+        assertEquals(2, secondGroupSnap.tabGroups.size)
+        assertEquals(2, secondGroupSnap.tabGroups.map { it.id }.distinct().size)
+
+        // Closing tab2 automatically prunes the emptied "읽기 목록" group
+        val afterCloseTab2 = restored.closeTab(tab2)
+        assertEquals(1, afterCloseTab2.tabGroups.size)
+        assertEquals(group1.id, afterCloseTab2.tabGroups.first().id)
+
+        // Ungrouping removes group while keeping its tabs open
+        val tabsBeforeUngroup = afterCloseTab2.tabs.size
+        val afterUngroup = restored.ungroupTabGroup(group1.id)
+        assertTrue(afterUngroup.tabGroups.isEmpty())
+        assertEquals(tabsBeforeUngroup, afterUngroup.tabs.size)
     }
 }

@@ -141,6 +141,14 @@ data class BrowserTabState(
 )
 
 @Serializable
+data class TabGroup(
+    val id: String,
+    val title: String,
+    val colorIndex: Int = 0,
+    val tabIds: List<String> = emptyList(),
+)
+
+@Serializable
 data class ToolbarConfig(
     val leftActions: List<ToolbarAction> = defaultLeftActions(),
     val rightActions: List<ToolbarAction> = defaultRightActions(),
@@ -177,6 +185,7 @@ data class AiCliProfile(
     val id: String,
     val name: String,
     val cliType: String,
+    val providerSubtype: String = "",
     val endpointOrCommand: String,
     val apiKey: String = "",
     val selectedModel: String = "",
@@ -192,6 +201,12 @@ data class AiCliProfile(
         const val CLI_TYPE_KIMI = "kimi"
         const val CLI_TYPE_OLLAMA = "ollama"
         const val CLI_TYPE_CUSTOM = "custom"
+
+        const val KIMI_SUBTYPE_GLOBAL = "kimi_api_global"
+        const val KIMI_SUBTYPE_CHINA = "kimi_api_china"
+        const val KIMI_SUBTYPE_CODE = "kimi_code"
+        const val KIMI_SUBTYPE_LOCAL = "kimi_local_cli"
+
         const val DEFAULT_AI_SYSTEM_PROMPT =
             "당신은 한국어로 답변하는 유능한 웹페이지 분석 어시스턴트입니다. 핵심 내용을 구조화하여 명확하고 간결하게 요약하세요."
     }
@@ -273,12 +288,15 @@ data class BrowserPreferences(
 
         const val KIMI_GLOBAL_ENDPOINT = "https://api.moonshot.ai/v1"
         const val KIMI_CHINA_ENDPOINT = "https://api.moonshot.cn/v1"
+        const val KIMI_CODE_ENDPOINT = "https://api.kimi.com/coding/v1"
+        const val KIMI_LOCAL_CLI_ENDPOINT = "http://127.0.0.1:8080/v1"
 
         fun defaultAiProfiles(): List<AiCliProfile> = listOf(
             AiCliProfile(
                 id = "gemini_cli",
                 name = "Gemini CLI",
                 cliType = AiCliProfile.CLI_TYPE_GEMINI,
+                providerSubtype = "",
                 endpointOrCommand = "https://generativelanguage.googleapis.com/v1beta",
                 apiKey = "",
                 selectedModel = "",
@@ -291,7 +309,8 @@ data class BrowserPreferences(
                 id = "claude_cli",
                 name = "Claude CLI",
                 cliType = AiCliProfile.CLI_TYPE_CLAUDE,
-                endpointOrCommand = "https://api.anthropic.com/v1/messages",
+                providerSubtype = "",
+                endpointOrCommand = "https://api.anthropic.com/v1",
                 apiKey = "",
                 selectedModel = "",
                 availableModels = emptyList(),
@@ -303,6 +322,7 @@ data class BrowserPreferences(
                 id = "codex_openai_cli",
                 name = "Codex / OpenAI CLI",
                 cliType = AiCliProfile.CLI_TYPE_OPENAI,
+                providerSubtype = "",
                 endpointOrCommand = "https://api.openai.com/v1",
                 apiKey = "",
                 selectedModel = "",
@@ -315,6 +335,7 @@ data class BrowserPreferences(
                 id = "kimi_cli",
                 name = "Kimi CLI",
                 cliType = AiCliProfile.CLI_TYPE_KIMI,
+                providerSubtype = AiCliProfile.KIMI_SUBTYPE_GLOBAL,
                 endpointOrCommand = KIMI_GLOBAL_ENDPOINT,
                 apiKey = "",
                 selectedModel = "",
@@ -327,6 +348,7 @@ data class BrowserPreferences(
                 id = "ollama_cli",
                 name = "Ollama (로컬 CLI)",
                 cliType = AiCliProfile.CLI_TYPE_OLLAMA,
+                providerSubtype = "",
                 endpointOrCommand = "http://127.0.0.1:11434",
                 apiKey = "",
                 selectedModel = "",
@@ -339,6 +361,7 @@ data class BrowserPreferences(
                 id = "custom_cli_preset",
                 name = "사용자 지정 AI CLI",
                 cliType = AiCliProfile.CLI_TYPE_CUSTOM,
+                providerSubtype = "",
                 endpointOrCommand = "http://127.0.0.1:8080/v1",
                 apiKey = "",
                 selectedModel = "",
@@ -373,6 +396,7 @@ data class BrowserCoreSnapshot(
     val tabs: List<BrowserTabState>,
     val activeTabId: String,
     val secondaryTabId: String? = null,
+    val tabGroups: List<TabGroup> = emptyList(),
     val preferences: BrowserPreferences,
     val historyCount: Int,
     val bookmarks: List<BookmarkEntry> = emptyList(),
@@ -392,6 +416,7 @@ data class PersistedCoreState(
     val tabs: List<BrowserTabState>,
     val activeTabId: String,
     val secondaryTabId: String? = null,
+    val tabGroups: List<TabGroup> = emptyList(),
     val preferences: BrowserPreferences,
     val history: List<HistoryEntry>,
     val bookmarks: List<BookmarkEntry> = emptyList(),
@@ -430,6 +455,29 @@ interface BrowserCoreBridge {
     fun ensureSecondaryTabForDualPane(): BrowserCoreSnapshot
 
     fun closeTab(tabId: String): BrowserCoreSnapshot
+
+    fun createTabGroup(
+        title: String,
+        tabIds: List<String>,
+        colorIndex: Int = 0,
+    ): BrowserCoreSnapshot
+
+    fun addTabToGroup(
+        groupId: String,
+        tabId: String,
+    ): BrowserCoreSnapshot
+
+    fun removeTabFromGroup(
+        groupId: String,
+        tabId: String,
+    ): BrowserCoreSnapshot
+
+    fun ungroupTabGroup(groupId: String): BrowserCoreSnapshot
+
+    fun renameTabGroup(
+        groupId: String,
+        newTitle: String,
+    ): BrowserCoreSnapshot
 
     fun updateTabNavigation(
         tabId: String,
@@ -516,6 +564,7 @@ interface BrowserCoreBridge {
         addCustomModel: String? = null,
         temperature: Float? = null,
         systemPrompt: String? = null,
+        providerSubtype: String? = null,
     ): BrowserCoreSnapshot
 
     fun setAiProfileModels(
@@ -531,6 +580,7 @@ interface BrowserCoreBridge {
         selectedModel: String,
         temperature: Float = 0.4f,
         systemPrompt: String = AiCliProfile.DEFAULT_AI_SYSTEM_PROMPT,
+        providerSubtype: String = "",
     ): BrowserCoreSnapshot
 
     fun deleteAiProfile(profileId: String): BrowserCoreSnapshot
@@ -575,6 +625,7 @@ class LocalKotlinCore(
 
     private val lock = Any()
     private var tabSequence = 1L
+    private var tabGroupSequence = 1L
     private var historySequence = 1L
     private var bookmarkSequence = 1L
     private var aiProfileSequence = 1L
@@ -801,6 +852,9 @@ class LocalKotlinCore(
                 if (index == -1) return@update current
 
                 val remaining = current.tabs.filterNot { it.id == tabId }
+                val prunedGroups = current.tabGroups
+                    .map { group -> group.copy(tabIds = group.tabIds.filterNot { it == tabId }) }
+                    .filter { it.tabIds.isNotEmpty() }
                 if (remaining.isEmpty()) {
                     val freshTab = BrowserTabState(
                         id = nextTabId(),
@@ -811,6 +865,7 @@ class LocalKotlinCore(
                         tabs = listOf(freshTab),
                         activeTabId = freshTab.id,
                         secondaryTabId = null,
+                        tabGroups = emptyList(),
                     )
                 } else {
                     val nextActive = if (current.activeTabId == tabId) {
@@ -826,11 +881,99 @@ class LocalKotlinCore(
                         tabs = remaining,
                         activeTabId = nextActive,
                         secondaryTabId = nextSecondary,
+                        tabGroups = prunedGroups,
                     )
                 }
             }
             _snapshotFlow.value
         }
+
+    override fun createTabGroup(
+        title: String,
+        tabIds: List<String>,
+        colorIndex: Int,
+    ): BrowserCoreSnapshot = synchronized(lock) {
+        _snapshotFlow.update { current ->
+            val validTabIdSet = current.tabs.map { it.id }.toSet()
+            val cleanedIds = tabIds.distinct().filter { it in validTabIdSet }
+            val resolvedIds = cleanedIds.ifEmpty {
+                listOfNotNull(current.activeTab?.id ?: current.tabs.firstOrNull()?.id)
+            }
+            if (resolvedIds.isEmpty()) return@update current
+            val assignedSet = resolvedIds.toSet()
+            val updatedExisting = current.tabGroups
+                .map { group -> group.copy(tabIds = group.tabIds.filterNot { it in assignedSet }) }
+                .filter { it.tabIds.isNotEmpty() }
+            val cleanTitle = title.trim().ifEmpty { "그룹 ${updatedExisting.size + 1}" }
+            val newGroup = TabGroup(
+                id = "grp_${tabGroupSequence++}",
+                title = cleanTitle,
+                colorIndex = colorIndex.coerceIn(0, 5),
+                tabIds = resolvedIds,
+            )
+            current.copy(tabGroups = listOf(newGroup) + updatedExisting)
+        }
+        _snapshotFlow.value
+    }
+
+    override fun addTabToGroup(
+        groupId: String,
+        tabId: String,
+    ): BrowserCoreSnapshot = synchronized(lock) {
+        _snapshotFlow.update { current ->
+            if (current.tabs.none { it.id == tabId }) return@update current
+            if (current.tabGroups.none { it.id == groupId }) return@update current
+            val updated = current.tabGroups.map { group ->
+                when (group.id) {
+                    groupId -> group.copy(tabIds = (group.tabIds + tabId).distinct())
+                    else -> group.copy(tabIds = group.tabIds.filterNot { it == tabId })
+                }
+            }.filter { it.tabIds.isNotEmpty() }
+            current.copy(tabGroups = updated)
+        }
+        _snapshotFlow.value
+    }
+
+    override fun removeTabFromGroup(
+        groupId: String,
+        tabId: String,
+    ): BrowserCoreSnapshot = synchronized(lock) {
+        _snapshotFlow.update { current ->
+            val updated = current.tabGroups.map { group ->
+                if (group.id == groupId) {
+                    group.copy(tabIds = group.tabIds.filterNot { it == tabId })
+                } else {
+                    group
+                }
+            }.filter { it.tabIds.isNotEmpty() }
+            current.copy(tabGroups = updated)
+        }
+        _snapshotFlow.value
+    }
+
+    override fun ungroupTabGroup(groupId: String): BrowserCoreSnapshot =
+        synchronized(lock) {
+            _snapshotFlow.update { current ->
+                current.copy(tabGroups = current.tabGroups.filterNot { it.id == groupId })
+            }
+            _snapshotFlow.value
+        }
+
+    override fun renameTabGroup(
+        groupId: String,
+        newTitle: String,
+    ): BrowserCoreSnapshot = synchronized(lock) {
+        val clean = newTitle.trim()
+        if (clean.isEmpty()) return@synchronized _snapshotFlow.value
+        _snapshotFlow.update { current ->
+            current.copy(
+                tabGroups = current.tabGroups.map { group ->
+                    if (group.id == groupId) group.copy(title = clean) else group
+                }
+            )
+        }
+        _snapshotFlow.value
+    }
 
     override fun updateTabNavigation(
         tabId: String,
@@ -1187,6 +1330,7 @@ class LocalKotlinCore(
         addCustomModel: String?,
         temperature: Float?,
         systemPrompt: String?,
+        providerSubtype: String?,
     ): BrowserCoreSnapshot = synchronized(lock) {
         _snapshotFlow.update { current ->
             val updatedList = current.preferences.aiProfiles.map { profile ->
@@ -1209,6 +1353,7 @@ class LocalKotlinCore(
                     }
                     profile.copy(
                         name = name?.trim()?.takeIf { it.isNotEmpty() } ?: profile.name,
+                        providerSubtype = providerSubtype?.trim() ?: profile.providerSubtype,
                         endpointOrCommand = endpointOrCommand?.trim() ?: profile.endpointOrCommand,
                         apiKey = apiKey ?: profile.apiKey,
                         selectedModel = nextSelectedModel,
@@ -1261,14 +1406,20 @@ class LocalKotlinCore(
         selectedModel: String,
         temperature: Float,
         systemPrompt: String,
+        providerSubtype: String,
     ): BrowserCoreSnapshot = synchronized(lock) {
         val cleanName = name.trim().ifEmpty { "사용자 지정 AI CLI" }
         val cleanModel = selectedModel.trim()
         val cleanEndpoint = endpointOrCommand.trim().ifEmpty { "http://127.0.0.1:8080/v1" }
+        val resolvedCliType = cliType.ifBlank { AiCliProfile.CLI_TYPE_CUSTOM }
+        val resolvedSubtype = providerSubtype.trim().ifEmpty {
+            inferProviderSubtype(resolvedCliType, cleanEndpoint)
+        }
         val newProfile = AiCliProfile(
             id = "custom_ai_${aiProfileSequence++}",
             name = cleanName,
-            cliType = cliType.ifBlank { AiCliProfile.CLI_TYPE_CUSTOM },
+            cliType = resolvedCliType,
+            providerSubtype = resolvedSubtype,
             endpointOrCommand = cleanEndpoint,
             apiKey = apiKey,
             selectedModel = cleanModel,
@@ -1447,10 +1598,15 @@ class LocalKotlinCore(
             }
             val safeSecondaryId = snap.secondaryTabId
                 ?.takeIf { sec -> sec != safeActiveId && safeTabs.any { it.id == sec } }
+            val safeTabIds = safeTabs.map { it.id }.toSet()
+            val safeGroups = snap.tabGroups
+                .map { group -> group.copy(tabIds = group.tabIds.filter { it in safeTabIds }.distinct()) }
+                .filter { it.tabIds.isNotEmpty() }
             val payload = PersistedCoreState(
                 tabs = safeTabs,
                 activeTabId = safeActiveId,
                 secondaryTabId = safeSecondaryId,
+                tabGroups = safeGroups,
                 preferences = snap.preferences,
                 history = historyBuffer.toList(),
                 bookmarks = bookmarkList.toList(),
@@ -1473,15 +1629,43 @@ class LocalKotlinCore(
                 val activeId = decoded.tabs[safeActiveIdx].id
                 val secondaryId = decoded.secondaryTabId
                     ?.takeIf { sec -> sec != activeId && decoded.tabs.any { it.id == sec } }
+                val restoredTabIds = decoded.tabs.map { it.id }.toSet()
+                val safeGroups = decoded.tabGroups
+                    .map { group ->
+                        group.copy(
+                            title = group.title.trim().ifEmpty { "그룹" },
+                            colorIndex = group.colorIndex.coerceIn(0, 5),
+                            tabIds = group.tabIds.filter { it in restoredTabIds }.distinct(),
+                        )
+                    }
+                    .filter { it.tabIds.isNotEmpty() }
                 val p = decoded.preferences
                 val safeAiProfiles = p.aiProfiles
                     .ifEmpty { BrowserPreferences.defaultAiProfiles() }
                     .map { profile ->
-                        profile.copy(temperature = profile.temperature.coerceIn(0f, 1.5f))
+                        val resolvedSubtype = profile.providerSubtype.ifBlank {
+                            inferProviderSubtype(profile.cliType, profile.endpointOrCommand)
+                        }
+                        profile.copy(
+                            providerSubtype = resolvedSubtype,
+                            temperature = profile.temperature.coerceIn(0f, 1.5f),
+                        )
                     }
                 val safeActiveAiId = p.activeAiProfileId.takeIf { id ->
                     safeAiProfiles.any { it.id == id }
                 } ?: safeAiProfiles.first().id
+
+                // Advance ID sequences past restored IDs so cold-restart never generates duplicate keys
+                val maxTabNum = decoded.tabs.mapNotNull { extractNumericSuffix(it.id, "tab_") }.maxOrNull() ?: 0L
+                tabSequence = maxOf(tabSequence, maxTabNum + 1L)
+                val maxGroupNum = safeGroups.mapNotNull { extractNumericSuffix(it.id, "grp_") }.maxOrNull() ?: 0L
+                tabGroupSequence = maxOf(tabGroupSequence, maxGroupNum + 1L)
+                val maxHistNum = decoded.history.mapNotNull { extractNumericSuffix(it.id, "hist_") }.maxOrNull() ?: 0L
+                historySequence = maxOf(historySequence, maxHistNum + 1L)
+                val maxBmNum = decoded.bookmarks.mapNotNull { extractNumericSuffix(it.id, "bm_") }.maxOrNull() ?: 0L
+                bookmarkSequence = maxOf(bookmarkSequence, maxBmNum + 1L)
+                val maxAiNum = safeAiProfiles.mapNotNull { extractNumericSuffix(it.id, "custom_ai_") }.maxOrNull() ?: 0L
+                aiProfileSequence = maxOf(aiProfileSequence, maxAiNum + 1L)
 
                 val clampedPrefs = p.copy(
                     barCornerRadiusDp = p.barCornerRadiusDp.coerceIn(6f, 36f),
@@ -1518,6 +1702,7 @@ class LocalKotlinCore(
                     tabs = decoded.tabs.map { it.copy(isLoading = false, progress = 0) },
                     activeTabId = activeId,
                     secondaryTabId = secondaryId,
+                    tabGroups = safeGroups,
                     preferences = clampedPrefs,
                     historyCount = historyBuffer.size,
                     bookmarks = bookmarkList.toList(),
@@ -1526,6 +1711,22 @@ class LocalKotlinCore(
                 true
             }.getOrDefault(false)
         }
+
+    private fun extractNumericSuffix(id: String, prefix: String): Long? =
+        if (id.startsWith(prefix)) id.removePrefix(prefix).toLongOrNull() else null
+
+    private fun inferProviderSubtype(cliType: String, endpoint: String): String {
+        if (cliType != AiCliProfile.CLI_TYPE_KIMI) return ""
+        val lower = endpoint.trim().lowercase()
+        return when {
+            lower.contains("api.kimi.com/coding") -> AiCliProfile.KIMI_SUBTYPE_CODE
+            lower.contains("moonshot.cn") -> AiCliProfile.KIMI_SUBTYPE_CHINA
+            lower.startsWith("http://127.0.0.1") ||
+                lower.startsWith("http://localhost") ||
+                lower.startsWith("http://10.0.2.2") -> AiCliProfile.KIMI_SUBTYPE_LOCAL
+            else -> AiCliProfile.KIMI_SUBTYPE_GLOBAL
+        }
+    }
 
     private fun nextTabId(): String = "tab_${tabSequence++}"
 
