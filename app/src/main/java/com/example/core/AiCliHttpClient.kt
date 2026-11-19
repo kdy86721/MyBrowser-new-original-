@@ -23,6 +23,7 @@ import java.net.URL
 import java.net.URLEncoder
 import java.net.UnknownHostException
 import javax.net.ssl.SSLException
+import kotlin.math.roundToInt
 
 data class AiCliResponse(
     val text: String,
@@ -206,10 +207,17 @@ object AiCliHttpClient {
             cleanEndpoint = endpoint,
             turns = listOf(AiChatTurn(isUser = true, text = "ping")),
         )
+        val probeTemp = sanitizeTemperature(0f, probeProfile.cliType, probeModel)
         val probeBody = buildJsonObject {
             put("model", probeModel)
-            put("max_tokens", 1)
-            put("temperature", 0.0)
+            if (isReasoningModelWithoutTemperature(probeProfile.cliType, probeModel)) {
+                put("max_completion_tokens", 1)
+            } else {
+                put("max_tokens", 1)
+            }
+            if (probeTemp != null) {
+                put("temperature", probeTemp)
+            }
             put("messages", buildJsonArray {
                 addJsonObject {
                     put("role", "user")
@@ -361,6 +369,7 @@ object AiCliHttpClient {
         val serverError = extractErrorMessage(rawBody)
         val detail = serverError.ifBlank { rawBody.trim().take(200) }
         return when (statusCode) {
+            400 -> "요청 파라미터 오류 (HTTP 400 · $profileName): ${detail.ifBlank { "모델명 또는 요청 형식을 확인하세요." }}"
             401, 403 -> "인증 실패 (HTTP $statusCode · $profileName): API 키 또는 권한을 확인하세요." +
                 if (detail.isNotBlank()) " ($detail)" else ""
             404 -> "엔드포인트를 찾을 수 없습니다 (HTTP 404): $url"
@@ -544,6 +553,42 @@ object AiCliHttpClient {
         }
     }
 
+    /**
+     * Detects OpenAI reasoning models (o1 / o3 / o4 series) that reject custom `temperature` values
+     * and expect `developer` instead of `system` role in Chat Completions payloads.
+     */
+    internal fun isReasoningModelWithoutTemperature(cliType: String, modelName: String): Boolean {
+        val m = modelName.trim().lowercase()
+        if (m.isEmpty()) return false
+        val isOpenAiSeries = m == "o1" || m.startsWith("o1-") ||
+            m == "o3" || m.startsWith("o3-") ||
+            m == "o4" || m.startsWith("o4-")
+        return isOpenAiSeries && (cliType == AiCliProfile.CLI_TYPE_OPENAI || cliType == AiCliProfile.CLI_TYPE_CUSTOM)
+    }
+
+    /**
+     * Sanitizes and clamps temperature strictly into `[0.0, 1.0]` (rounded to 2 decimal places so
+     * float-to-double rounding never produces `1.0000001`), preventing `HTTP 400: temperature must
+     * not be greater than 1.000000` on Kimi CLI / Moonshot and strict OpenAI-compatible endpoints.
+     * Returns `null` when the target reasoning model rejects the `temperature` parameter.
+     */
+    internal fun sanitizeTemperature(
+        rawTemp: Float,
+        cliType: String,
+        modelName: String,
+    ): Double? {
+        if (isReasoningModelWithoutTemperature(cliType, modelName)) {
+            return null
+        }
+        val m = modelName.trim().lowercase()
+        if (cliType == AiCliProfile.CLI_TYPE_KIMI && m.contains("thinking")) {
+            // kimi-k2-thinking / thinking models strictly require temperature <= 1.0 (recommended 1.0)
+            return ((rawTemp.coerceIn(0f, 1.0f) * 100f).roundToInt() / 100.0).coerceIn(0.0, 1.0)
+        }
+        val clamped = rawTemp.coerceIn(0f, 1.0f)
+        return ((clamped * 100f).roundToInt() / 100.0).coerceIn(0.0, 1.0)
+    }
+
     internal fun buildHttpSpec(
         profile: AiCliProfile,
         cleanEndpoint: String,
@@ -551,8 +596,9 @@ object AiCliHttpClient {
     ): Triple<String, Map<String, String>, String> {
         val trimmed = normalizeBaseUrl(cleanEndpoint)
         val systemText = profile.systemPrompt.ifBlank { AiCliProfile.DEFAULT_AI_SYSTEM_PROMPT }
-        val temp = profile.temperature.coerceIn(0f, 1.5f).toDouble()
         val cleanModel = profile.selectedModel.trim().removePrefix("models/")
+        val sanitizedTemp = sanitizeTemperature(profile.temperature, profile.cliType, cleanModel)
+        val cleanTurns = turns.filter { it.text.isNotBlank() }
 
         return when (profile.cliType) {
             AiCliProfile.CLI_TYPE_GEMINI -> {
@@ -576,7 +622,7 @@ object AiCliHttpClient {
                         })
                     })
                     put("contents", buildJsonArray {
-                        turns.forEach { turn ->
+                        cleanTurns.forEach { turn ->
                             addJsonObject {
                                 put("role", if (turn.isUser) "user" else "model")
                                 put("parts", buildJsonArray {
@@ -585,9 +631,11 @@ object AiCliHttpClient {
                             }
                         }
                     })
-                    put("generationConfig", buildJsonObject {
-                        put("temperature", temp)
-                    })
+                    if (sanitizedTemp != null) {
+                        put("generationConfig", buildJsonObject {
+                            put("temperature", sanitizedTemp)
+                        })
+                    }
                 }.toString()
                 Triple(url, emptyMap(), body)
             }
@@ -607,10 +655,12 @@ object AiCliHttpClient {
                 val body = buildJsonObject {
                     put("model", cleanModel)
                     put("max_tokens", 1400)
-                    put("temperature", temp.coerceAtMost(1.0))
+                    if (sanitizedTemp != null) {
+                        put("temperature", sanitizedTemp)
+                    }
                     put("system", systemText)
                     put("messages", buildJsonArray {
-                        turns.forEach { turn ->
+                        cleanTurns.forEach { turn ->
                             addJsonObject {
                                 put("role", if (turn.isUser) "user" else "assistant")
                                 put("content", turn.text)
@@ -636,15 +686,17 @@ object AiCliHttpClient {
                 val body = buildJsonObject {
                     put("model", cleanModel)
                     put("stream", false)
-                    put("options", buildJsonObject {
-                        put("temperature", temp)
-                    })
+                    if (sanitizedTemp != null) {
+                        put("options", buildJsonObject {
+                            put("temperature", sanitizedTemp)
+                        })
+                    }
                     put("messages", buildJsonArray {
                         addJsonObject {
                             put("role", "system")
                             put("content", systemText)
                         }
-                        turns.forEach { turn ->
+                        cleanTurns.forEach { turn ->
                             addJsonObject {
                                 put("role", if (turn.isUser) "user" else "assistant")
                                 put("content", turn.text)
@@ -674,15 +726,18 @@ object AiCliHttpClient {
                         put("User-Agent", KIMI_CODE_USER_AGENT)
                     }
                 }
+                val isReasoningModel = isReasoningModelWithoutTemperature(profile.cliType, cleanModel)
                 val body = buildJsonObject {
                     put("model", cleanModel)
-                    put("temperature", temp)
+                    if (sanitizedTemp != null) {
+                        put("temperature", sanitizedTemp)
+                    }
                     put("messages", buildJsonArray {
                         addJsonObject {
-                            put("role", "system")
+                            put("role", if (isReasoningModel) "developer" else "system")
                             put("content", systemText)
                         }
-                        turns.forEach { turn ->
+                        cleanTurns.forEach { turn ->
                             addJsonObject {
                                 put("role", if (turn.isUser) "user" else "assistant")
                                 put("content", turn.text)
@@ -741,8 +796,11 @@ object AiCliHttpClient {
     private fun extractOpenAiText(root: JsonObject): String? {
         val choices = root["choices"]?.jsonArray
         val firstChoice = choices?.firstOrNull()?.jsonObject
-        val msgContent = firstChoice?.get("message")?.jsonObject?.get("content")?.jsonPrimitive?.contentOrNull
+        val msgObj = firstChoice?.get("message")?.jsonObject
+        val msgContent = msgObj?.get("content")?.jsonPrimitive?.contentOrNull
         if (!msgContent.isNullOrBlank()) return msgContent
+        val reasoningContent = msgObj?.get("reasoning_content")?.jsonPrimitive?.contentOrNull
+        if (!reasoningContent.isNullOrBlank()) return reasoningContent
         val choiceText = firstChoice?.get("text")?.jsonPrimitive?.contentOrNull
         if (!choiceText.isNullOrBlank()) return choiceText
         return root["output_text"]?.jsonPrimitive?.contentOrNull

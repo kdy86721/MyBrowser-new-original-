@@ -349,14 +349,14 @@ class ExampleUnitTest {
             profileId = "claude_cli",
             apiKey = "test-claude-key",
             addCustomModel = "claude-sonnet-4-thinking",
-            temperature = 2.5f, // clamps to 1.5f
+            temperature = 2.5f, // clamps strictly to 1.0f
             systemPrompt = "3줄 핵심 요약",
         )
         val claude = core.getSnapshot().preferences.activeAiProfile()
         assertEquals("test-claude-key", claude.apiKey)
         assertEquals("claude-sonnet-4-thinking", claude.selectedModel)
         assertTrue("claude-sonnet-4-thinking" in claude.availableModels)
-        assertEquals(1.5f, claude.temperature, 0.001f)
+        assertEquals(1.0f, claude.temperature, 0.001f)
         assertEquals("3줄 핵심 요약", claude.systemPrompt)
 
         core.deleteAiProfile("claude_cli")
@@ -679,5 +679,81 @@ class ExampleUnitTest {
         val afterUngroup = restored.ungroupTabGroup(group1.id)
         assertTrue(afterUngroup.tabGroups.isEmpty())
         assertEquals(tabsBeforeUngroup, afterUngroup.tabs.size)
+    }
+
+    @Test
+    fun `ai temperature sanitization prevents HTTP 400 over 1_0 and handles reasoning models cleanly`() {
+        val sampleTurn = listOf(AiChatTurn(isUser = true, text = "요약해줘"))
+
+        // 1. Kimi CLI with out-of-range temperature 1.4f clamps strictly to 1.0
+        val kimiHighTemp = AiCliProfile(
+            id = "kimi_cli",
+            name = "Kimi CLI",
+            cliType = AiCliProfile.CLI_TYPE_KIMI,
+            providerSubtype = AiCliProfile.KIMI_SUBTYPE_GLOBAL,
+            endpointOrCommand = BrowserPreferences.KIMI_GLOBAL_ENDPOINT,
+            apiKey = "sk-kimi",
+            selectedModel = "kimi-k2-thinking",
+            temperature = 1.4f,
+        )
+        val (_, _, kimiBody) = AiCliHttpClient.buildHttpSpec(kimiHighTemp, kimiHighTemp.endpointOrCommand, sampleTurn)
+        assertTrue(kimiBody.contains("\"temperature\":1.0"))
+        assertFalse(kimiBody.contains("1.4"))
+
+        // 2. OpenAI o3 / o4 reasoning models omit temperature and use developer role
+        val o3Profile = AiCliProfile(
+            id = "codex_openai_cli",
+            name = "Codex / OpenAI CLI",
+            cliType = AiCliProfile.CLI_TYPE_OPENAI,
+            endpointOrCommand = "https://api.openai.com/v1",
+            apiKey = "sk-openai",
+            selectedModel = "o3-mini",
+            temperature = 0.8f,
+        )
+        val (_, _, o3Body) = AiCliHttpClient.buildHttpSpec(o3Profile, o3Profile.endpointOrCommand, sampleTurn)
+        assertFalse(o3Body.contains("\"temperature\""))
+        assertTrue(o3Body.contains("\"role\":\"developer\""))
+
+        // 3. Gemini, Claude, and Ollama also strictly clamp > 1.0 temperatures to 1.0
+        val geminiHigh = AiCliProfile(
+            id = "gemini_cli",
+            name = "Gemini CLI",
+            cliType = AiCliProfile.CLI_TYPE_GEMINI,
+            endpointOrCommand = "https://generativelanguage.googleapis.com/v1beta",
+            apiKey = "gm-key",
+            selectedModel = "gemini-2.5-flash",
+            temperature = 1.8f,
+        )
+        val (_, _, geminiBody) = AiCliHttpClient.buildHttpSpec(geminiHigh, geminiHigh.endpointOrCommand, sampleTurn)
+        assertTrue(geminiBody.contains("\"temperature\":1.0"))
+    }
+
+    @Test
+    fun `top and bottom safe area padding defaults, clamping, reset, and json roundtrip work cleanly`() {
+        val core = LocalKotlinCore()
+        assertEquals(0f, core.getSnapshot().preferences.topSafeAreaPaddingDp, 0.001f)
+        assertEquals(0f, core.getSnapshot().preferences.bottomSafeAreaPaddingDp, 0.001f)
+
+        core.updateSafeAreaPadding(topDp = 24f, bottomDp = 18f)
+        assertEquals(24f, core.getSnapshot().preferences.topSafeAreaPaddingDp, 0.001f)
+        assertEquals(18f, core.getSnapshot().preferences.bottomSafeAreaPaddingDp, 0.001f)
+
+        // Out-of-range values clamp cleanly to [0f, 64f]
+        core.updateSafeAreaPadding(topDp = 120f, bottomDp = -12f)
+        assertEquals(64f, core.getSnapshot().preferences.topSafeAreaPaddingDp, 0.001f)
+        assertEquals(0f, core.getSnapshot().preferences.bottomSafeAreaPaddingDp, 0.001f)
+
+        // JSON persistence roundtrip
+        core.updateSafeAreaPadding(topDp = 16f, bottomDp = 20f)
+        val exported = core.exportStateJson()
+        val restored = LocalKotlinCore()
+        assertTrue(restored.importStateJson(exported))
+        assertEquals(16f, restored.getSnapshot().preferences.topSafeAreaPaddingDp, 0.001f)
+        assertEquals(20f, restored.getSnapshot().preferences.bottomSafeAreaPaddingDp, 0.001f)
+
+        // Reset restores 0dp
+        restored.resetSafeAreaPadding()
+        assertEquals(0f, restored.getSnapshot().preferences.topSafeAreaPaddingDp, 0.001f)
+        assertEquals(0f, restored.getSnapshot().preferences.bottomSafeAreaPaddingDp, 0.001f)
     }
 }

@@ -4,12 +4,14 @@ import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -57,10 +59,12 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.TextRange
 import androidx.compose.ui.text.input.ImeAction
@@ -93,7 +97,8 @@ data class AiChatUiState(
 )
 
 /**
- * Full-screen edge-to-edge Liquid Glass AI Chat overlay launched via Address Bar Long-Press + Swipe Up.
+ * Bottom-anchored Liquid Glass AI Chat modal expanding directly upward from the bottom address bar
+ * when triggered via Address Bar Long-Press + Swipe Up.
  * Pre-fills the active tab URL with the cursor at the end without auto-sending.
  */
 @Composable
@@ -101,6 +106,9 @@ fun AiChatSheet(
     chatState: AiChatUiState,
     activeProfile: AiCliProfile,
     unifiedRadius: Dp,
+    glassOpacity: Float = 0.24f,
+    topSafeAreaPaddingDp: Dp = 0.dp,
+    bottomSafeAreaPaddingDp: Dp = 0.dp,
     onDismiss: () -> Unit,
     onSendMessage: (String) -> Unit,
     onClearChat: () -> Unit,
@@ -134,36 +142,64 @@ fun AiChatSheet(
         }
     }
 
-    val sheetShape = RoundedCornerShape(topStart = unifiedRadius, topEnd = unifiedRadius)
-    val fullScreenBackground = Brush.verticalGradient(
-        colors = listOf(ObsidianSurface, ObsidianVoid)
+    val modalShape = RoundedCornerShape(unifiedRadius)
+    val modalBackground = Brush.verticalGradient(
+        colors = listOf(
+            ObsidianSurface.copy(alpha = 0.96f),
+            ObsidianVoid.copy(alpha = 0.98f),
+        )
     )
 
     Box(
         modifier = Modifier
-            .fillMaxSize()
-            .clip(sheetShape)
-            .background(fullScreenBackground)
-            .border(
-                width = 0.75.dp,
-                brush = Brush.verticalGradient(
-                    listOf(Color.White.copy(alpha = 0.24f), Color.Transparent)
-                ),
-                shape = sheetShape,
-            )
-            .testTag("ai_chat_sheet"),
-        contentAlignment = Alignment.TopCenter,
+            .fillMaxWidth()
+            .statusBarsPadding()
+            .navigationBarsPadding()
+            .imePadding()
+            .padding(
+                start = 10.dp,
+                end = 10.dp,
+                top = 12.dp + topSafeAreaPaddingDp,
+                bottom = 8.dp + bottomSafeAreaPaddingDp,
+            ),
+        contentAlignment = Alignment.BottomCenter,
     ) {
-        Column(
+        Box(
             modifier = Modifier
                 .widthIn(max = 680.dp)
-                .fillMaxSize()
-                .statusBarsPadding()
-                .navigationBarsPadding()
-                .imePadding()
-                .padding(horizontal = 18.dp, vertical = 10.dp),
-            verticalArrangement = Arrangement.spacedBy(12.dp),
+                .fillMaxWidth()
+                .fillMaxHeight(0.84f)
+                .shadow(
+                    elevation = 28.dp,
+                    shape = modalShape,
+                    clip = false,
+                    ambientColor = Color.Black.copy(alpha = 0.60f),
+                    spotColor = Color.Black.copy(alpha = 0.78f),
+                )
+                .clip(modalShape)
+                .background(modalBackground)
+                .border(
+                    width = 0.85.dp,
+                    brush = Brush.verticalGradient(
+                        listOf(
+                            IceCyan.copy(alpha = 0.36f),
+                            Color.White.copy(alpha = 0.14f),
+                        )
+                    ),
+                    shape = modalShape,
+                )
+                .pointerInput(Unit) {
+                    detectTapGestures { /* consume taps inside modal card */ }
+                }
+                .testTag("ai_chat_sheet"),
         ) {
+            Column(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .background(Color.White.copy(alpha = (glassOpacity * 0.12f).coerceIn(0.01f, 0.06f)))
+                    .padding(horizontal = 16.dp, vertical = 10.dp),
+                verticalArrangement = Arrangement.spacedBy(10.dp),
+            ) {
             // Bottom-sheet drag handle bar
             Box(
                 modifier = Modifier
@@ -458,7 +494,12 @@ fun AiChatSheet(
                             .border(0.5.dp, Color.White.copy(alpha = 0.14f), chipShape)
                             .clickable {
                                 val base = inputFieldValue.text.trimEnd()
-                                val updated = if (base.isEmpty()) promptSuffix.trimStart() else "$base\n$promptSuffix".trim()
+                                val cleanSuffix = promptSuffix.trim()
+                                val updated = when {
+                                    base.isEmpty() -> cleanSuffix
+                                    base.contains(cleanSuffix) -> base
+                                    else -> "$base\n$cleanSuffix"
+                                }
                                 inputFieldValue = TextFieldValue(
                                     text = updated,
                                     selection = TextRange(updated.length),
@@ -542,6 +583,7 @@ fun AiChatSheet(
                     )
                 }
             }
+        }
         }
     }
 }

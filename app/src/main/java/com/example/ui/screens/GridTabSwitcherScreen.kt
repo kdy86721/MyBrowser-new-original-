@@ -311,7 +311,12 @@ fun GridTabSwitcherScreen(
                 .statusBarsPadding()
                 .navigationBarsPadding()
                 .imePadding()
-                .padding(horizontal = 16.dp, vertical = 10.dp),
+                .padding(
+                    start = 16.dp,
+                    end = 16.dp,
+                    top = 10.dp + prefs.topSafeAreaPaddingDp.dp,
+                    bottom = 10.dp + prefs.bottomSafeAreaPaddingDp.dp,
+                ),
             verticalArrangement = Arrangement.spacedBy(10.dp),
         ) {
             // 1. Top Drag Handle + Segmented Switcher (draggable downward to dismiss window)

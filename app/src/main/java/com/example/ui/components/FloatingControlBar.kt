@@ -285,7 +285,7 @@ fun FloatingControlBar(
             .padding(
                 start = hingeSideMargin,
                 end = hingeSideMargin,
-                bottom = prefs.barBottomOffsetDp.dp,
+                bottom = (prefs.barBottomOffsetDp + prefs.bottomSafeAreaPaddingDp).dp,
                 top = 6.dp,
             ),
         horizontalAlignment = Alignment.CenterHorizontally,
@@ -563,7 +563,7 @@ fun QuickToggleDropdownMenu(
             12.dp
         }
         val menuWidth = minOf(desiredMenuWidth, (maxWidth - hingePad * 2).coerceAtLeast(220.dp))
-        val bottomClearance = (prefs.barBottomOffsetDp + prefs.barHeightDp + 10f).dp
+        val bottomClearance = (prefs.barBottomOffsetDp + prefs.bottomSafeAreaPaddingDp + prefs.barHeightDp + 10f).dp
 
         // Anchor horizontally to the right edge of the active floating bar (where the gear sits)
         val maxCap = if (foldablePosture.isUnfolded) 740.dp else 640.dp

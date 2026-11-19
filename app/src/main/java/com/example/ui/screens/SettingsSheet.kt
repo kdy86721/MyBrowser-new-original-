@@ -165,6 +165,8 @@ fun SettingsSheet(
         horizontalBias: Float?,
         glassOpacity: Float?,
     ) -> Unit,
+    onUpdateSafeAreaPadding: (topDp: Float?, bottomDp: Float?) -> Unit,
+    onResetSafeAreaPadding: () -> Unit,
     onToggleQuickToggleAction: (QuickToggleAction) -> Unit,
     onMoveQuickToggleAction: (QuickToggleAction, Int) -> Unit,
     onUpdateDropdownCustomization: (
@@ -291,6 +293,8 @@ fun SettingsSheet(
                 } else {
                     SettingsSubPageContainer(
                         category = category,
+                        topSafeAreaPaddingDp = prefs.topSafeAreaPaddingDp.dp,
+                        bottomSafeAreaPaddingDp = prefs.bottomSafeAreaPaddingDp.dp,
                         onBack = { activeCategory = null },
                         trailingAction = {
                             when (category) {
@@ -380,6 +384,8 @@ fun SettingsSheet(
                                 unifiedRadius = unifiedRadius,
                                 innerRadius = innerRadius,
                                 onUpdateBarGeometry = onUpdateBarGeometry,
+                                onUpdateSafeAreaPadding = onUpdateSafeAreaPadding,
+                                onResetSafeAreaPadding = onResetSafeAreaPadding,
                                 onToggleQuickToggleAction = onToggleQuickToggleAction,
                                 onMoveQuickToggleAction = onMoveQuickToggleAction,
                                 onUpdateDropdownCustomization = onUpdateDropdownCustomization,
@@ -433,6 +439,8 @@ fun SettingsSheet(
                             SettingsCategory.DISPLAY_GESTURES -> DisplayAndGesturesPage(
                                 snapshot = snapshot,
                                 unifiedRadius = unifiedRadius,
+                                onUpdateSafeAreaPadding = onUpdateSafeAreaPadding,
+                                onResetSafeAreaPadding = onResetSafeAreaPadding,
                                 onToggleScrollToPill = onToggleScrollToPill,
                                 onToggleExpandBarOnAddressEdit = onToggleExpandBarOnAddressEdit,
                                 onSelectTabSwitcherStyle = onSelectTabSwitcherStyle,
@@ -495,7 +503,12 @@ fun HistoryAndBookmarksSheet(
                 .fillMaxSize()
                 .statusBarsPadding()
                 .navigationBarsPadding()
-                .padding(horizontal = 20.dp, vertical = 14.dp),
+                .padding(
+                    start = 20.dp,
+                    end = 20.dp,
+                    top = 14.dp + prefs.topSafeAreaPaddingDp.dp,
+                    bottom = 14.dp + prefs.bottomSafeAreaPaddingDp.dp,
+                ),
             verticalArrangement = Arrangement.spacedBy(14.dp),
         ) {
             Row(
@@ -714,7 +727,12 @@ private fun TopLevelSettingsCategories(
             .verticalScroll(rememberScrollState())
             .statusBarsPadding()
             .navigationBarsPadding()
-            .padding(horizontal = 16.dp, vertical = 12.dp)
+            .padding(
+                start = 16.dp,
+                end = 16.dp,
+                top = 12.dp + prefs.topSafeAreaPaddingDp.dp,
+                bottom = 12.dp + prefs.bottomSafeAreaPaddingDp.dp,
+            )
             .testTag("settings_category_list"),
         verticalArrangement = Arrangement.spacedBy(12.dp),
     ) {
@@ -848,6 +866,8 @@ private fun CategoryRowCard(
 @Composable
 private fun SettingsSubPageContainer(
     category: SettingsCategory,
+    topSafeAreaPaddingDp: Dp = 0.dp,
+    bottomSafeAreaPaddingDp: Dp = 0.dp,
     onBack: () -> Unit,
     trailingAction: @Composable () -> Unit = {},
     content: @Composable () -> Unit,
@@ -857,7 +877,12 @@ private fun SettingsSubPageContainer(
             .fillMaxSize()
             .statusBarsPadding()
             .navigationBarsPadding()
-            .padding(horizontal = 20.dp, vertical = 14.dp),
+            .padding(
+                start = 20.dp,
+                end = 20.dp,
+                top = 14.dp + topSafeAreaPaddingDp,
+                bottom = 14.dp + bottomSafeAreaPaddingDp,
+            ),
     ) {
         Row(
             modifier = Modifier
@@ -907,6 +932,8 @@ private fun CustomizationPage(
     unifiedRadius: Dp,
     innerRadius: Dp,
     onUpdateBarGeometry: (Float?, Float?, Float?, Float?, Float?, Float?) -> Unit,
+    onUpdateSafeAreaPadding: (Float?, Float?) -> Unit,
+    onResetSafeAreaPadding: () -> Unit,
     onToggleQuickToggleAction: (QuickToggleAction) -> Unit,
     onMoveQuickToggleAction: (QuickToggleAction, Int) -> Unit,
     onUpdateDropdownCustomization: (QuickToggleLayoutStyle?, Float?, ToggleIndicatorStyle?) -> Unit,
@@ -1052,6 +1079,15 @@ private fun CustomizationPage(
         unifiedRadius = unifiedRadius,
         testTag = "slider_glass_opacity",
         onValueChange = { onUpdateBarGeometry(null, null, null, null, null, it) },
+    )
+
+    SafeAreaInsetControlCard(
+        topSafeAreaDp = prefs.topSafeAreaPaddingDp,
+        bottomSafeAreaDp = prefs.bottomSafeAreaPaddingDp,
+        unifiedRadius = unifiedRadius,
+        innerRadius = innerRadius,
+        onUpdateSafeAreaPadding = onUpdateSafeAreaPadding,
+        onResetSafeAreaPadding = onResetSafeAreaPadding,
     )
 
     // Quick-Toggle Dropdown Menu Editor (layout style, indicator style, max height, selection & ordering)
@@ -1714,6 +1750,8 @@ private fun SearchEnginePage(
 private fun DisplayAndGesturesPage(
     snapshot: BrowserCoreSnapshot,
     unifiedRadius: Dp,
+    onUpdateSafeAreaPadding: (Float?, Float?) -> Unit,
+    onResetSafeAreaPadding: () -> Unit,
     onToggleScrollToPill: (Boolean) -> Unit,
     onToggleExpandBarOnAddressEdit: (Boolean) -> Unit,
     onSelectTabSwitcherStyle: (Int) -> Unit,
@@ -1724,6 +1762,15 @@ private fun DisplayAndGesturesPage(
     val prefs = snapshot.preferences
     val activeTab = snapshot.activeTab
     val innerRadius = unifiedInnerRadius(unifiedRadius)
+
+    SafeAreaInsetControlCard(
+        topSafeAreaDp = prefs.topSafeAreaPaddingDp,
+        bottomSafeAreaDp = prefs.bottomSafeAreaPaddingDp,
+        unifiedRadius = unifiedRadius,
+        innerRadius = innerRadius,
+        onUpdateSafeAreaPadding = onUpdateSafeAreaPadding,
+        onResetSafeAreaPadding = onResetSafeAreaPadding,
+    )
 
     SettingsToggleRow(
         icon = Icons.Rounded.UnfoldMore,
@@ -1862,6 +1909,129 @@ private fun DisplayAndGesturesPage(
         onCheckedChange = onToggleImagesBlocked,
         testTag = "toggle_images_blocked",
     )
+}
+
+@Composable
+private fun SafeAreaInsetControlCard(
+    topSafeAreaDp: Float,
+    bottomSafeAreaDp: Float,
+    unifiedRadius: Dp,
+    innerRadius: Dp,
+    onUpdateSafeAreaPadding: (topDp: Float?, bottomDp: Float?) -> Unit,
+    onResetSafeAreaPadding: () -> Unit,
+) {
+    val cardShape = RoundedCornerShape(unifiedRadius)
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(cardShape)
+            .background(ObsidianElevated.copy(alpha = 0.70f))
+            .border(0.5.dp, Color.White.copy(alpha = 0.10f), cardShape)
+            .padding(14.dp)
+            .testTag("safe_area_inset_card"),
+        verticalArrangement = Arrangement.spacedBy(10.dp),
+    ) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.SpaceBetween,
+        ) {
+            Column(
+                modifier = Modifier.weight(1f),
+                verticalArrangement = Arrangement.spacedBy(2.dp),
+            ) {
+                Text(
+                    text = "화면 안전영역 추가 여백",
+                    style = MaterialTheme.typography.titleMedium,
+                    color = PureFrost,
+                )
+                Text(
+                    text = "노치, 둥근 모서리, 제스처 바 겹침 방지를 위해 모든 화면 상·하단 여백 추가",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = FrostSlate,
+                )
+            }
+            TextButton(
+                onClick = onResetSafeAreaPadding,
+                enabled = topSafeAreaDp > 0f || bottomSafeAreaDp > 0f,
+                shape = RoundedCornerShape(innerRadius),
+                modifier = Modifier.testTag("reset_safe_area_button"),
+            ) {
+                Icon(
+                    imageVector = Icons.Rounded.RestartAlt,
+                    contentDescription = null,
+                    tint = if (topSafeAreaDp > 0f || bottomSafeAreaDp > 0f) IceCyan else FrostSlate.copy(alpha = 0.45f),
+                    modifier = Modifier.size(16.dp),
+                )
+                Spacer(Modifier.width(4.dp))
+                Text(
+                    text = "0dp 초기화",
+                    style = MaterialTheme.typography.labelMedium,
+                    color = if (topSafeAreaDp > 0f || bottomSafeAreaDp > 0f) IceCyan else FrostSlate.copy(alpha = 0.45f),
+                )
+            }
+        }
+
+        Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween,
+            ) {
+                Text(
+                    text = "상단 안전영역 추가 여백",
+                    style = MaterialTheme.typography.bodyLarge,
+                    color = PureFrost,
+                )
+                Text(
+                    text = "${topSafeAreaDp.roundToInt()}dp",
+                    style = MaterialTheme.typography.labelMedium,
+                    color = IceCyan,
+                )
+            }
+            Slider(
+                value = topSafeAreaDp.coerceIn(0f, 64f),
+                onValueChange = { onUpdateSafeAreaPadding(it, null) },
+                valueRange = 0f..64f,
+                colors = SliderDefaults.colors(
+                    thumbColor = IceCyan,
+                    activeTrackColor = IceCyan,
+                    inactiveTrackColor = ObsidianVoid,
+                ),
+                modifier = Modifier.testTag("slider_top_safe_area"),
+            )
+        }
+
+        Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween,
+            ) {
+                Text(
+                    text = "하단 안전영역 추가 여백",
+                    style = MaterialTheme.typography.bodyLarge,
+                    color = PureFrost,
+                )
+                Text(
+                    text = "${bottomSafeAreaDp.roundToInt()}dp",
+                    style = MaterialTheme.typography.labelMedium,
+                    color = IceCyan,
+                )
+            }
+            Slider(
+                value = bottomSafeAreaDp.coerceIn(0f, 64f),
+                onValueChange = { onUpdateSafeAreaPadding(null, it) },
+                valueRange = 0f..64f,
+                colors = SliderDefaults.colors(
+                    thumbColor = IceCyan,
+                    activeTrackColor = IceCyan,
+                    inactiveTrackColor = ObsidianVoid,
+                ),
+                modifier = Modifier.testTag("slider_bottom_safe_area"),
+            )
+        }
+    }
 }
 
 @Composable

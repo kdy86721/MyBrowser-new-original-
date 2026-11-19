@@ -131,6 +131,8 @@ data class PageSummaryState(
 fun PageSummarySheet(
     summaryState: PageSummaryState,
     unifiedRadius: Dp,
+    topSafeAreaPaddingDp: Dp = 0.dp,
+    bottomSafeAreaPaddingDp: Dp = 0.dp,
     onDismiss: () -> Unit,
     onAskAiQuestion: (String?) -> Unit,
     onOpenAiSettings: () -> Unit,
@@ -158,7 +160,12 @@ fun PageSummarySheet(
                 .statusBarsPadding()
                 .navigationBarsPadding()
                 .imePadding()
-                .padding(horizontal = 20.dp, vertical = 14.dp),
+                .padding(
+                    start = 20.dp,
+                    end = 20.dp,
+                    top = 14.dp + topSafeAreaPaddingDp,
+                    bottom = 14.dp + bottomSafeAreaPaddingDp,
+                ),
             verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
             Row(
@@ -1229,30 +1236,32 @@ private fun PerAiModelConfigSection(
             }
         }
 
-        // Temperature slider (0.0f..1.5f)
+        // Temperature slider (0.0f..1.0f for Kimi/OpenAI/Claude/Gemini strict API compliance)
         Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+            val clampedTemp = profile.temperature.coerceIn(0f, 1.0f)
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.SpaceBetween,
             ) {
                 Text(
-                    text = "창의성 온도 (Temperature)",
+                    text = "창의성 온도 (Temperature · 0.0~1.0)",
                     style = MaterialTheme.typography.bodyLarge,
                     color = PureFrost,
                 )
                 Text(
-                    text = "${(profile.temperature * 100f).roundToInt() / 100f}",
+                    text = String.format("%.2f", (clampedTemp * 100f).roundToInt() / 100f),
                     style = MaterialTheme.typography.labelMedium,
                     color = IceCyan,
                 )
             }
             Slider(
-                value = profile.temperature,
+                value = clampedTemp,
                 onValueChange = {
-                    onUpdateAiProfile(profile.id, null, null, null, null, null, it, null, null)
+                    val clean = ((it.coerceIn(0f, 1.0f) * 100f).roundToInt() / 100f).coerceIn(0f, 1.0f)
+                    onUpdateAiProfile(profile.id, null, null, null, null, null, clean, null, null)
                 },
-                valueRange = 0f..1.5f,
+                valueRange = 0f..1.0f,
                 colors = SliderDefaults.colors(
                     thumbColor = IceCyan,
                     activeTrackColor = IceCyan,

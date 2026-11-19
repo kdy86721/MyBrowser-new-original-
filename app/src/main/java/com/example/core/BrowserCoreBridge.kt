@@ -231,6 +231,8 @@ data class BrowserPreferences(
     val barBottomOffsetDp: Float = DEFAULT_BAR_BOTTOM_OFFSET_DP,
     val barHorizontalBias: Float = DEFAULT_BAR_HORIZONTAL_BIAS,
     val glassOpacity: Float = DEFAULT_GLASS_OPACITY,
+    val topSafeAreaPaddingDp: Float = DEFAULT_TOP_SAFE_AREA_PADDING_DP,
+    val bottomSafeAreaPaddingDp: Float = DEFAULT_BOTTOM_SAFE_AREA_PADDING_DP,
     val customQuickToggles: List<QuickToggleAction> = defaultQuickToggles(),
     val dropdownLayoutStyle: QuickToggleLayoutStyle = QuickToggleLayoutStyle.SINGLE_COLUMN_LIST,
     val dropdownMaxHeightDp: Float = DEFAULT_DROPDOWN_MAX_HEIGHT_DP,
@@ -266,6 +268,8 @@ data class BrowserPreferences(
         const val DEFAULT_BAR_BOTTOM_OFFSET_DP = 12f
         const val DEFAULT_BAR_HORIZONTAL_BIAS = 0f
         const val DEFAULT_GLASS_OPACITY = 0.16f
+        const val DEFAULT_TOP_SAFE_AREA_PADDING_DP = 0f
+        const val DEFAULT_BOTTOM_SAFE_AREA_PADDING_DP = 0f
         const val DEFAULT_DROPDOWN_MAX_HEIGHT_DP = 380f
         const val DEFAULT_FOLDABLE_HINGE_AVOIDANCE_DP = 12f
         const val DEFAULT_UNFOLDED_BAR_WIDTH_FRACTION = 0.62f
@@ -517,6 +521,13 @@ interface BrowserCoreBridge {
         horizontalBias: Float? = null,
         glassOpacity: Float? = null,
     ): BrowserCoreSnapshot
+
+    fun updateSafeAreaPadding(
+        topDp: Float? = null,
+        bottomDp: Float? = null,
+    ): BrowserCoreSnapshot
+
+    fun resetSafeAreaPadding(): BrowserCoreSnapshot
 
     fun setCustomQuickToggles(toggles: List<QuickToggleAction>): BrowserCoreSnapshot
 
@@ -1140,6 +1151,34 @@ class LocalKotlinCore(
         _snapshotFlow.value
     }
 
+    override fun updateSafeAreaPadding(
+        topDp: Float?,
+        bottomDp: Float?,
+    ): BrowserCoreSnapshot = synchronized(lock) {
+        _snapshotFlow.update { current ->
+            val p = current.preferences
+            current.copy(
+                preferences = p.copy(
+                    topSafeAreaPaddingDp = (topDp ?: p.topSafeAreaPaddingDp).coerceIn(0f, 64f),
+                    bottomSafeAreaPaddingDp = (bottomDp ?: p.bottomSafeAreaPaddingDp).coerceIn(0f, 64f),
+                )
+            )
+        }
+        _snapshotFlow.value
+    }
+
+    override fun resetSafeAreaPadding(): BrowserCoreSnapshot = synchronized(lock) {
+        _snapshotFlow.update { current ->
+            current.copy(
+                preferences = current.preferences.copy(
+                    topSafeAreaPaddingDp = BrowserPreferences.DEFAULT_TOP_SAFE_AREA_PADDING_DP,
+                    bottomSafeAreaPaddingDp = BrowserPreferences.DEFAULT_BOTTOM_SAFE_AREA_PADDING_DP,
+                )
+            )
+        }
+        _snapshotFlow.value
+    }
+
     override fun setCustomQuickToggles(toggles: List<QuickToggleAction>): BrowserCoreSnapshot =
         synchronized(lock) {
             _snapshotFlow.update { current ->
@@ -1358,7 +1397,7 @@ class LocalKotlinCore(
                         apiKey = apiKey ?: profile.apiKey,
                         selectedModel = nextSelectedModel,
                         availableModels = ensuredModels,
-                        temperature = (temperature ?: profile.temperature).coerceIn(0f, 1.5f),
+                        temperature = (temperature ?: profile.temperature).coerceIn(0f, 1.0f),
                         systemPrompt = systemPrompt ?: profile.systemPrompt,
                     )
                 }
@@ -1424,7 +1463,7 @@ class LocalKotlinCore(
             apiKey = apiKey,
             selectedModel = cleanModel,
             availableModels = if (cleanModel.isNotEmpty()) listOf(cleanModel) else emptyList(),
-            temperature = temperature.coerceIn(0f, 1.5f),
+            temperature = temperature.coerceIn(0f, 1.0f),
             systemPrompt = systemPrompt.ifBlank { AiCliProfile.DEFAULT_AI_SYSTEM_PROMPT },
             isCustom = true,
         )
@@ -1648,7 +1687,7 @@ class LocalKotlinCore(
                         }
                         profile.copy(
                             providerSubtype = resolvedSubtype,
-                            temperature = profile.temperature.coerceIn(0f, 1.5f),
+                            temperature = profile.temperature.coerceIn(0f, 1.0f),
                         )
                     }
                 val safeActiveAiId = p.activeAiProfileId.takeIf { id ->
@@ -1674,6 +1713,8 @@ class LocalKotlinCore(
                     barBottomOffsetDp = p.barBottomOffsetDp.coerceIn(4f, 64f),
                     barHorizontalBias = p.barHorizontalBias.coerceIn(-1f, 1f),
                     glassOpacity = p.glassOpacity.coerceIn(0.05f, 0.45f),
+                    topSafeAreaPaddingDp = p.topSafeAreaPaddingDp.coerceIn(0f, 64f),
+                    bottomSafeAreaPaddingDp = p.bottomSafeAreaPaddingDp.coerceIn(0f, 64f),
                     dropdownMaxHeightDp = p.dropdownMaxHeightDp.coerceIn(220f, 540f),
                     foldableHingeAvoidanceDp = p.foldableHingeAvoidanceDp.coerceIn(0f, 32f),
                     unfoldedBarWidthFraction = p.unfoldedBarWidthFraction.coerceIn(0.40f, 1.0f),

@@ -59,6 +59,7 @@ import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.runtime.Composable
@@ -79,6 +80,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.TransformOrigin
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
@@ -525,6 +527,14 @@ class BrowserViewModel(
 
     fun resetBarCustomization() {
         core.resetBarCustomization()
+    }
+
+    fun updateSafeAreaPadding(topDp: Float? = null, bottomDp: Float? = null) {
+        core.updateSafeAreaPadding(topDp = topDp, bottomDp = bottomDp)
+    }
+
+    fun resetSafeAreaPadding() {
+        core.resetSafeAreaPadding()
     }
 
     fun setJavaScriptEnabled(enabled: Boolean) {
@@ -1154,7 +1164,13 @@ private fun MyBrowserRootScreen(
             val cleanMessage = rawMessage.trim()
             if (cleanMessage.isNotEmpty() && !aiChatUiState.isLoading) {
                 val activeProfile = snapshotState.value.preferences.activeAiProfile()
-                val updatedHistory = aiChatUiState.messages + AiChatTurn(isUser = true, text = cleanMessage)
+                val lastTurn = aiChatUiState.messages.lastOrNull()
+                val updatedHistory = if (lastTurn != null && lastTurn.isUser && lastTurn.text == cleanMessage) {
+                    // Prevent duplicate identical user messages from stacking on retry / rapid tap
+                    aiChatUiState.messages
+                } else {
+                    aiChatUiState.messages + AiChatTurn(isUser = true, text = cleanMessage)
+                }
                 aiChatUiState = aiChatUiState.copy(
                     messages = updatedHistory,
                     isLoading = true,
@@ -1327,25 +1343,87 @@ private fun MyBrowserRootScreen(
                     translationX = -size.width * 0.25f * parallaxProgress
                 },
         ) {
-            if (isDualPaneActive && primaryTab != null && secondaryTab != null) {
-                val centerGapDp = maxOf(
-                    prefs.foldableHingeAvoidanceDp.dp,
-                    hingeWidthDp + prefs.foldableHingeAvoidanceDp.dp,
-                ).coerceAtLeast(2.dp)
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(
+                        top = prefs.topSafeAreaPaddingDp.dp,
+                        bottom = prefs.bottomSafeAreaPaddingDp.dp,
+                    ),
+            ) {
+                if (isDualPaneActive && primaryTab != null && secondaryTab != null) {
+                    val centerGapDp = maxOf(
+                        prefs.foldableHingeAvoidanceDp.dp,
+                        hingeWidthDp + prefs.foldableHingeAvoidanceDp.dp,
+                    ).coerceAtLeast(2.dp)
 
-                Row(
-                    modifier = Modifier
-                        .fillMaxSize()
-                        .testTag("dual_pane_container"),
-                ) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .testTag("dual_pane_container"),
+                    ) {
+                        key(primaryTab.id) {
+                            WebViewPane(
+                                tab = primaryTab,
+                                preferences = prefs,
+                                webViewPool = webViewPool,
+                                viewModel = viewModel,
+                                isDualPane = true,
+                                isFocusedPane = focusedPaneIndex == 0,
+                                onPaneFocused = { focusedPaneIndex = 0 },
+                                onScrollDelta = onScrollDelta,
+                                onOpenFileChooser = onOpenFileChooser,
+                                onCreateNewWindow = onCreateNewWindowTab,
+                                onCloseWindow = { wv -> closeWindowByWebView(wv, webViewPool, viewModel) },
+                                onShowCustomView = onShowFullscreenVideo,
+                                onHideCustomView = onHideFullscreenVideo,
+                                onCaptureThumbnail = { id, wv -> captureTabThumbnail(id, wv) },
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .fillMaxHeight()
+                                    .testTag("dual_pane_left_webview"),
+                            )
+                        }
+
+                        Box(
+                            modifier = Modifier
+                                .width(centerGapDp)
+                                .fillMaxHeight()
+                                .background(Color(0xFF050810)),
+                        )
+
+                        key(secondaryTab.id) {
+                            WebViewPane(
+                                tab = secondaryTab,
+                                preferences = prefs,
+                                webViewPool = webViewPool,
+                                viewModel = viewModel,
+                                isDualPane = true,
+                                isFocusedPane = focusedPaneIndex == 1,
+                                onPaneFocused = { focusedPaneIndex = 1 },
+                                onScrollDelta = onScrollDelta,
+                                onOpenFileChooser = onOpenFileChooser,
+                                onCreateNewWindow = onCreateNewWindowTab,
+                                onCloseWindow = { wv -> closeWindowByWebView(wv, webViewPool, viewModel) },
+                                onShowCustomView = onShowFullscreenVideo,
+                                onHideCustomView = onHideFullscreenVideo,
+                                onCaptureThumbnail = { id, wv -> captureTabThumbnail(id, wv) },
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .fillMaxHeight()
+                                    .testTag("dual_pane_right_webview"),
+                            )
+                        }
+                    }
+                } else if (primaryTab != null) {
                     key(primaryTab.id) {
                         WebViewPane(
                             tab = primaryTab,
                             preferences = prefs,
                             webViewPool = webViewPool,
                             viewModel = viewModel,
-                            isDualPane = true,
-                            isFocusedPane = focusedPaneIndex == 0,
+                            isDualPane = false,
+                            isFocusedPane = true,
                             onPaneFocused = { focusedPaneIndex = 0 },
                             onScrollDelta = onScrollDelta,
                             onOpenFileChooser = onOpenFileChooser,
@@ -1355,63 +1433,10 @@ private fun MyBrowserRootScreen(
                             onHideCustomView = onHideFullscreenVideo,
                             onCaptureThumbnail = { id, wv -> captureTabThumbnail(id, wv) },
                             modifier = Modifier
-                                .weight(1f)
-                                .fillMaxHeight()
-                                .testTag("dual_pane_left_webview"),
+                                .fillMaxSize()
+                                .testTag("fullscreen_webview"),
                         )
                     }
-
-                    Box(
-                        modifier = Modifier
-                            .width(centerGapDp)
-                            .fillMaxHeight()
-                            .background(Color(0xFF050810)),
-                    )
-
-                    key(secondaryTab.id) {
-                        WebViewPane(
-                            tab = secondaryTab,
-                            preferences = prefs,
-                            webViewPool = webViewPool,
-                            viewModel = viewModel,
-                            isDualPane = true,
-                            isFocusedPane = focusedPaneIndex == 1,
-                            onPaneFocused = { focusedPaneIndex = 1 },
-                            onScrollDelta = onScrollDelta,
-                            onOpenFileChooser = onOpenFileChooser,
-                            onCreateNewWindow = onCreateNewWindowTab,
-                            onCloseWindow = { wv -> closeWindowByWebView(wv, webViewPool, viewModel) },
-                            onShowCustomView = onShowFullscreenVideo,
-                            onHideCustomView = onHideFullscreenVideo,
-                            onCaptureThumbnail = { id, wv -> captureTabThumbnail(id, wv) },
-                            modifier = Modifier
-                                .weight(1f)
-                                .fillMaxHeight()
-                                .testTag("dual_pane_right_webview"),
-                        )
-                    }
-                }
-            } else if (primaryTab != null) {
-                key(primaryTab.id) {
-                    WebViewPane(
-                        tab = primaryTab,
-                        preferences = prefs,
-                        webViewPool = webViewPool,
-                        viewModel = viewModel,
-                        isDualPane = false,
-                        isFocusedPane = true,
-                        onPaneFocused = { focusedPaneIndex = 0 },
-                        onScrollDelta = onScrollDelta,
-                        onOpenFileChooser = onOpenFileChooser,
-                        onCreateNewWindow = onCreateNewWindowTab,
-                        onCloseWindow = { wv -> closeWindowByWebView(wv, webViewPool, viewModel) },
-                        onShowCustomView = onShowFullscreenVideo,
-                        onHideCustomView = onHideFullscreenVideo,
-                        onCaptureThumbnail = { id, wv -> captureTabThumbnail(id, wv) },
-                        modifier = Modifier
-                            .fillMaxSize()
-                            .testTag("fullscreen_webview"),
-                    )
                 }
             }
 
@@ -1420,6 +1445,7 @@ private fun MyBrowserRootScreen(
                 modifier = Modifier
                     .fillMaxWidth()
                     .statusBarsPadding()
+                    .padding(top = prefs.topSafeAreaPaddingDp.dp)
                     .height(16.dp)
                     .align(Alignment.TopCenter)
                     .background(
@@ -1746,6 +1772,10 @@ private fun MyBrowserRootScreen(
                         glassOpacity = opacity,
                     )
                 },
+                onUpdateSafeAreaPadding = { topDp, bottomDp ->
+                    viewModel.updateSafeAreaPadding(topDp = topDp, bottomDp = bottomDp)
+                },
+                onResetSafeAreaPadding = { viewModel.resetSafeAreaPadding() },
                 onToggleQuickToggleAction = { viewModel.toggleQuickToggleAction(it) },
                 onMoveQuickToggleAction = { action, delta ->
                     viewModel.moveQuickToggleAction(action, delta)
@@ -1935,6 +1965,8 @@ private fun MyBrowserRootScreen(
             PageSummarySheet(
                 summaryState = pageSummaryState,
                 unifiedRadius = prefs.barCornerRadiusDp.dp,
+                topSafeAreaPaddingDp = prefs.topSafeAreaPaddingDp.dp,
+                bottomSafeAreaPaddingDp = prefs.bottomSafeAreaPaddingDp.dp,
                 onDismiss = { activeOverlay = PushOverlay.NONE },
                 onAskAiQuestion = { q -> triggerPageSummaryAndAi(q) },
                 onOpenAiSettings = {
@@ -1944,65 +1976,73 @@ private fun MyBrowserRootScreen(
             )
         }
 
-        // 4.5 Spring Bottom-Sheet Transition: Liquid Glass AI Chat (Long-Press + Swipe Up with URL pre-filled)
+        // 4.5 Bottom-Anchored Modal Expansion from Address Bar: Liquid Glass AI Chat
         AnimatedVisibility(
             visible = activeOverlay == PushOverlay.AI_CHAT,
-            enter = fadeIn(animationSpec = tween(durationMillis = 220)),
-            exit = fadeOut(animationSpec = tween(durationMillis = 200)),
+            enter = fadeIn(animationSpec = tween(durationMillis = 180)),
+            exit = fadeOut(animationSpec = tween(durationMillis = 150)),
         ) {
             Box(
                 modifier = Modifier
                     .fillMaxSize()
-                    .background(Color.Black.copy(alpha = 0.42f))
+                    .background(Color.Black.copy(alpha = 0.52f))
+                    .pointerInput(Unit) {
+                        detectTapGestures(onTap = { activeOverlay = PushOverlay.NONE })
+                    }
+                    .testTag("ai_chat_modal_backdrop"),
             )
         }
 
-        AnimatedVisibility(
-            visible = activeOverlay == PushOverlay.AI_CHAT,
-            enter = slideInVertically(
-                animationSpec = spring(
-                    dampingRatio = 0.84f,
-                    stiffness = Spring.StiffnessMediumLow,
-                ),
-                initialOffsetY = { it },
-            ) + expandVertically(
-                expandFrom = Alignment.Bottom,
-                animationSpec = spring(
-                    dampingRatio = 0.84f,
-                    stiffness = Spring.StiffnessMediumLow,
-                ),
-            ),
-            exit = slideOutVertically(
-                animationSpec = spring(
-                    dampingRatio = 0.86f,
-                    stiffness = Spring.StiffnessMediumLow,
-                ),
-                targetOffsetY = { it },
-            ) + shrinkVertically(
-                shrinkTowards = Alignment.Bottom,
-                animationSpec = spring(
-                    dampingRatio = 0.86f,
-                    stiffness = Spring.StiffnessMediumLow,
-                ),
-            ),
+        Box(
+            modifier = Modifier.fillMaxSize(),
+            contentAlignment = Alignment.BottomCenter,
         ) {
-            AiChatSheet(
-                chatState = aiChatUiState,
-                activeProfile = prefs.activeAiProfile(),
-                unifiedRadius = prefs.barCornerRadiusDp.dp,
-                onDismiss = { activeOverlay = PushOverlay.NONE },
-                onSendMessage = sendAiChatMessage,
-                onClearChat = {
-                    aiChatUiState = aiChatUiState.copy(
-                        messages = emptyList(),
-                        errorMessage = null,
-                    )
-                },
-                onOpenAiSettings = {
-                    openSettingsDirectlyToAi = true
-                    activeOverlay = PushOverlay.SETTINGS
-                },
-            )
+            AnimatedVisibility(
+                visible = activeOverlay == PushOverlay.AI_CHAT,
+                enter = expandVertically(
+                    expandFrom = Alignment.Bottom,
+                    animationSpec = spring(
+                        dampingRatio = 0.85f,
+                        stiffness = Spring.StiffnessMediumLow,
+                    ),
+                ) + scaleIn(
+                    initialScale = 0.92f,
+                    transformOrigin = TransformOrigin(0.5f, 1f),
+                    animationSpec = spring(
+                        dampingRatio = 0.85f,
+                        stiffness = Spring.StiffnessMediumLow,
+                    ),
+                ) + fadeIn(animationSpec = tween(durationMillis = 160)),
+                exit = shrinkVertically(
+                    shrinkTowards = Alignment.Bottom,
+                    animationSpec = tween(durationMillis = 180),
+                ) + scaleOut(
+                    targetScale = 0.92f,
+                    transformOrigin = TransformOrigin(0.5f, 1f),
+                    animationSpec = tween(durationMillis = 180),
+                ) + fadeOut(animationSpec = tween(durationMillis = 140)),
+            ) {
+                AiChatSheet(
+                    chatState = aiChatUiState,
+                    activeProfile = prefs.activeAiProfile(),
+                    unifiedRadius = prefs.barCornerRadiusDp.dp,
+                    glassOpacity = prefs.glassOpacity,
+                    topSafeAreaPaddingDp = prefs.topSafeAreaPaddingDp.dp,
+                    bottomSafeAreaPaddingDp = prefs.bottomSafeAreaPaddingDp.dp,
+                    onDismiss = { activeOverlay = PushOverlay.NONE },
+                    onSendMessage = sendAiChatMessage,
+                    onClearChat = {
+                        aiChatUiState = aiChatUiState.copy(
+                            messages = emptyList(),
+                            errorMessage = null,
+                        )
+                    },
+                    onOpenAiSettings = {
+                        openSettingsDirectlyToAi = true
+                        activeOverlay = PushOverlay.SETTINGS
+                    },
+                )
+            }
         }
 
         // 5. Full-Screen 2-Column Grid Preview Tab Switcher
