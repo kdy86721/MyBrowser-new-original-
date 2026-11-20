@@ -70,6 +70,7 @@ import androidx.compose.material.icons.rounded.AutoAwesome
 import androidx.compose.material.icons.rounded.Bookmark
 import androidx.compose.material.icons.rounded.BookmarkBorder
 import androidx.compose.material.icons.rounded.Close
+import androidx.compose.material.icons.rounded.CloseFullscreen
 import androidx.compose.material.icons.rounded.Computer
 import androidx.compose.material.icons.rounded.DarkMode
 import androidx.compose.material.icons.rounded.FindInPage
@@ -231,6 +232,10 @@ fun FloatingControlBar(
     onAddressSwipeTab: (delta: Int) -> Unit,
     onAddressDoubleTap: () -> Unit,
     onLongPressSwipeUpAiChat: () -> Unit,
+    isSplitPaneBar: Boolean = false,
+    paneTagPrefix: String = "",
+    onCloseSplitPane: (() -> Unit)? = null,
+    onLongPressSwipeSplit: ((placeCurrentOnLeft: Boolean) -> Unit)? = null,
     modifier: Modifier = Modifier,
 ) {
     val activeTab = snapshot.activeTab
@@ -239,13 +244,19 @@ fun FloatingControlBar(
     val unifiedRadius = prefs.barCornerRadiusDp.dp
     val innerRadius = unifiedInnerRadius(unifiedRadius)
 
-    val (effectiveWidthFraction, effectiveHorizontalBias) = resolveEffectiveBarGeometry(
-        prefs = prefs,
-        foldablePosture = foldablePosture,
-    )
+    val (effectiveWidthFraction, effectiveHorizontalBias) = if (isSplitPaneBar) {
+        1.0f to 0f
+    } else {
+        resolveEffectiveBarGeometry(
+            prefs = prefs,
+            foldablePosture = foldablePosture,
+        )
+    }
 
-    val effectiveLeftActions = remember(toolbarConfig.leftActions, foldablePosture.isUnfolded, prefs.autoExpandToolbarWhenUnfolded) {
-        if (foldablePosture.isUnfolded && prefs.autoExpandToolbarWhenUnfolded && toolbarConfig.leftActions.size < ToolbarConfig.MAX_ACTIONS_PER_SIDE) {
+    val allowAutoExpandIcons = !isSplitPaneBar && foldablePosture.isUnfolded && prefs.autoExpandToolbarWhenUnfolded
+
+    val effectiveLeftActions = remember(toolbarConfig.leftActions, allowAutoExpandIcons) {
+        if (allowAutoExpandIcons && toolbarConfig.leftActions.size < ToolbarConfig.MAX_ACTIONS_PER_SIDE) {
             val extras = listOf(ToolbarAction.HOME, ToolbarAction.BACK, ToolbarAction.FORWARD)
                 .filterNot { it in toolbarConfig.leftActions || it in toolbarConfig.rightActions }
             (toolbarConfig.leftActions + extras).take(ToolbarConfig.MAX_ACTIONS_PER_SIDE)
@@ -254,8 +265,8 @@ fun FloatingControlBar(
         }
     }
 
-    val effectiveRightActions = remember(toolbarConfig.rightActions, effectiveLeftActions, foldablePosture.isUnfolded, prefs.autoExpandToolbarWhenUnfolded) {
-        if (foldablePosture.isUnfolded && prefs.autoExpandToolbarWhenUnfolded && toolbarConfig.rightActions.size < ToolbarConfig.MAX_ACTIONS_PER_SIDE) {
+    val effectiveRightActions = remember(toolbarConfig.rightActions, effectiveLeftActions, allowAutoExpandIcons) {
+        if (allowAutoExpandIcons && toolbarConfig.rightActions.size < ToolbarConfig.MAX_ACTIONS_PER_SIDE) {
             val extras = listOf(ToolbarAction.NEW_TAB, ToolbarAction.DESKTOP_MODE, ToolbarAction.SHARE)
                 .filterNot { it in toolbarConfig.rightActions || it in effectiveLeftActions }
             (toolbarConfig.rightActions + extras).take(ToolbarConfig.MAX_ACTIONS_PER_SIDE)
@@ -271,10 +282,10 @@ fun FloatingControlBar(
         !isQuickMenuOpen &&
         !isFindInPageOpen
 
-    val hingeSideMargin = if (foldablePosture.isUnfolded && foldablePosture.isVerticalHinge) {
-        maxOf(12.dp, prefs.foldableHingeAvoidanceDp.dp)
-    } else {
-        12.dp
+    val hingeSideMargin = when {
+        isSplitPaneBar -> 8.dp
+        foldablePosture.isUnfolded && foldablePosture.isVerticalHinge -> maxOf(12.dp, prefs.foldableHingeAvoidanceDp.dp)
+        else -> 12.dp
     }
 
     Column(
@@ -370,7 +381,7 @@ fun FloatingControlBar(
                 modifier = Modifier
                     .align(BiasAlignment(horizontalBias = animatedBias, verticalBias = 0f))
                     .width(animatedBarWidth)
-                    .testTag("floating_control_bar"),
+                    .testTag("${paneTagPrefix}floating_control_bar"),
                 contentAlignment = Alignment.Center,
             ) {
                 LiquidGlassSurface(
@@ -438,6 +449,7 @@ fun FloatingControlBar(
                             swipeLeftRightTabSwitch = prefs.swipeLeftRightTabSwitch,
                             doubleTapAction = prefs.doubleTapAction,
                             longPressSwipeUpAiChatEnabled = prefs.longPressSwipeUpAiChatEnabled,
+                            longPressSwipeSplitEnabled = foldablePosture.isUnfolded && prefs.foldableLongPressSwipeSplitEnabled,
                             gestureSensitivityDp = prefs.gestureSensitivityDp,
                             onTapToEdit = onEnterAddressEdit,
                             onExitEdit = onExitAddressEdit,
@@ -448,6 +460,7 @@ fun FloatingControlBar(
                             onSwipeTab = onAddressSwipeTab,
                             onDoubleTap = onAddressDoubleTap,
                             onLongPressSwipeUpAiChat = onLongPressSwipeUpAiChat,
+                            onLongPressSwipeSplit = onLongPressSwipeSplit,
                             modifier = Modifier
                                 .weight(1f)
                                 .padding(horizontal = if (effectiveCollapsed) 2.dp else 4.dp),
@@ -476,6 +489,23 @@ fun FloatingControlBar(
                             }
                         }
 
+                        // 3.5 Close / Merge Split Pane Button (visible only inside Dual-Pane Split View bars)
+                        AnimatedVisibility(
+                            visible = isSplitPaneBar && onCloseSplitPane != null && !isEditingAddress && !effectiveCollapsed,
+                            enter = fadeIn(tween(180)) + expandHorizontally(spring(stiffness = 380f)),
+                            exit = fadeOut(tween(140)) + shrinkHorizontally(spring(stiffness = 380f)),
+                        ) {
+                            GlassIconButton(
+                                icon = Icons.Rounded.CloseFullscreen,
+                                contentDescription = "분할 화면 닫기",
+                                tint = FrostSlate,
+                                isActive = false,
+                                cornerRadius = innerRadius,
+                                onClick = { onCloseSplitPane?.invoke() },
+                                modifier = Modifier.testTag("${paneTagPrefix}close_split_pane_button"),
+                            )
+                        }
+
                         // 4. Far-Right Fixed Gear Button (toggles Quick-Toggle dropdown menu)
                         AnimatedVisibility(
                             visible = !isEditingAddress && !effectiveCollapsed,
@@ -489,7 +519,7 @@ fun FloatingControlBar(
                                 isActive = isQuickMenuOpen,
                                 cornerRadius = innerRadius,
                                 onClick = onToggleQuickMenu,
-                                modifier = Modifier.testTag("settings_button"),
+                                modifier = Modifier.testTag("${paneTagPrefix}settings_button"),
                             )
                         }
                     }
@@ -553,6 +583,8 @@ fun QuickToggleDropdownMenu(
     onDismiss: () -> Unit,
     onQuickToggle: (QuickToggleAction) -> Unit,
     onOpenFullSettings: () -> Unit,
+    anchorPaneIndex: Int? = null,
+    centerHingeGapDp: Dp = 0.dp,
 ) {
     val prefs = snapshot.preferences
     val activeTab = snapshot.activeTab
@@ -572,7 +604,9 @@ fun QuickToggleDropdownMenu(
     ) {
         val isTwoColumn = prefs.dropdownLayoutStyle == QuickToggleLayoutStyle.TWO_COLUMN_TILES
         val desiredMenuWidth = if (isTwoColumn) 320.dp else 274.dp
-        val hingePad = if (foldablePosture.isUnfolded && foldablePosture.isVerticalHinge) {
+        val hingePad = if (anchorPaneIndex != null) {
+            8.dp
+        } else if (foldablePosture.isUnfolded && foldablePosture.isVerticalHinge) {
             maxOf(12.dp, prefs.foldableHingeAvoidanceDp.dp)
         } else {
             12.dp
@@ -580,12 +614,23 @@ fun QuickToggleDropdownMenu(
         val menuWidth = minOf(desiredMenuWidth, (maxWidth - hingePad * 2).coerceAtLeast(220.dp))
         val bottomClearance = (prefs.barBottomOffsetDp + prefs.bottomSafeAreaPaddingDp + prefs.barHeightDp + 10f).dp
 
-        // Anchor horizontally to the right edge of the active floating bar (where the gear sits)
-        val maxCap = if (foldablePosture.isUnfolded) 740.dp else 640.dp
-        val usableRowWidth = (maxWidth - hingePad * 2).coerceAtLeast(220.dp)
-        val barWidth = minOf(usableRowWidth * effectiveWidthFraction, maxCap)
-        val barLeftOffset = (usableRowWidth - barWidth) * ((effectiveHorizontalBias + 1f) / 2f)
-        val barRightEdge = hingePad + barLeftOffset + barWidth
+        // Anchor horizontally to the right edge of the active floating bar (or the active split pane's bar)
+        val barRightEdge = when (anchorPaneIndex) {
+            0 -> {
+                val leftPaneWidth = ((maxWidth - centerHingeGapDp) / 2f).coerceAtLeast(180.dp)
+                (leftPaneWidth - 8.dp).coerceAtLeast(hingePad)
+            }
+            1 -> {
+                (maxWidth - 8.dp).coerceAtLeast(hingePad)
+            }
+            else -> {
+                val maxCap = if (foldablePosture.isUnfolded) 740.dp else 640.dp
+                val usableRowWidth = (maxWidth - hingePad * 2).coerceAtLeast(220.dp)
+                val barWidth = minOf(usableRowWidth * effectiveWidthFraction, maxCap)
+                val barLeftOffset = (usableRowWidth - barWidth) * ((effectiveHorizontalBias + 1f) / 2f)
+                hingePad + barLeftOffset + barWidth
+            }
+        }
         val targetMenuLeft = (barRightEdge - menuWidth).coerceIn(
             minimumValue = hingePad,
             maximumValue = (maxWidth - menuWidth - hingePad).coerceAtLeast(hingePad),
@@ -1198,6 +1243,7 @@ private fun AddressCapsule(
     swipeLeftRightTabSwitch: Boolean,
     doubleTapAction: Int,
     longPressSwipeUpAiChatEnabled: Boolean,
+    longPressSwipeSplitEnabled: Boolean = false,
     gestureSensitivityDp: Float,
     onTapToEdit: () -> Unit,
     onExitEdit: () -> Unit,
@@ -1208,6 +1254,7 @@ private fun AddressCapsule(
     onSwipeTab: (delta: Int) -> Unit,
     onDoubleTap: () -> Unit,
     onLongPressSwipeUpAiChat: () -> Unit,
+    onLongPressSwipeSplit: ((placeCurrentOnLeft: Boolean) -> Unit)? = null,
     modifier: Modifier = Modifier,
 ) {
     val currentUrl = activeTab?.url.orEmpty()
@@ -1230,6 +1277,9 @@ private fun AddressCapsule(
     val latestOnSwipeTab by rememberUpdatedState(onSwipeTab)
     val latestOnDoubleTap by rememberUpdatedState(onDoubleTap)
     val latestOnLongPressSwipeUpAiChat by rememberUpdatedState(onLongPressSwipeUpAiChat)
+    val latestOnLongPressSwipeSplit by rememberUpdatedState(onLongPressSwipeSplit)
+    val canLongPressSplit = longPressSwipeSplitEnabled && onLongPressSwipeSplit != null
+    val canArmLongPress = longPressSwipeUpAiChatEnabled || canLongPressSplit
 
     var isLongPressArmed by remember(isEditing) { mutableStateOf(false) }
     var targetVisualDragX by remember(isEditing) { mutableFloatStateOf(0f) }
@@ -1368,6 +1418,7 @@ private fun AddressCapsule(
                             swipeLeftRightTabSwitch,
                             doubleTapAction,
                             longPressSwipeUpAiChatEnabled,
+                            canLongPressSplit,
                             sensitivityPx,
                         ) {
                             awaitEachGesture {
@@ -1400,7 +1451,7 @@ private fun AddressCapsule(
                                     // Phase A: Before touchSlop or Long-Press timeout
                                     while (!armedLongPress && !isDragging) {
                                         val elapsedMs = (System.nanoTime() - startNanos) / 1_000_000L
-                                        val event = if (!longPressTimedOut && longPressSwipeUpAiChatEnabled) {
+                                        val event = if (!longPressTimedOut && canArmLongPress) {
                                             val remainingMs = (longPressTimeoutMs - elapsedMs).coerceAtLeast(1L)
                                             withTimeoutOrNull(remainingMs) {
                                                 awaitPointerEvent(PointerEventPass.Main)
@@ -1411,7 +1462,7 @@ private fun AddressCapsule(
 
                                         if (event == null) {
                                             longPressTimedOut = true
-                                            if (longPressSwipeUpAiChatEnabled) {
+                                            if (canArmLongPress) {
                                                 armedLongPress = true
                                                 isLongPressArmed = true
                                                 performAddressLongPressHaptic(context, hapticFeedback)
@@ -1470,6 +1521,12 @@ private fun AddressCapsule(
                                                 ) {
                                                     change?.consume()
                                                     latestOnLongPressSwipeUpAiChat()
+                                                } else if (canLongPressSplit &&
+                                                    abs(totalDx) > sensitivityPx &&
+                                                    abs(totalDx) > abs(totalDy)
+                                                ) {
+                                                    change?.consume()
+                                                    latestOnLongPressSwipeSplit?.invoke(totalDx < 0f)
                                                 } else if (change != null && !change.isConsumed) {
                                                     change.consume()
                                                     latestOnTapToEdit()
@@ -1500,11 +1557,15 @@ private fun AddressCapsule(
                                         totalDy += delta.y
                                         if (armedLongPress) {
                                             change.consume()
-                                            targetVisualDragX = 0f
-                                            targetVisualDragY = if (totalDy < 0f) {
-                                                (totalDy * 0.42f).coerceIn(-maxArmedLiftPx, 0f)
+                                            if (canLongPressSplit && abs(totalDx) > abs(totalDy)) {
+                                                targetVisualDragY = 0f
+                                                targetVisualDragX = (totalDx * 0.42f).coerceIn(-maxVisualDragPx, maxVisualDragPx)
+                                            } else if (longPressSwipeUpAiChatEnabled && totalDy < 0f) {
+                                                targetVisualDragX = 0f
+                                                targetVisualDragY = (totalDy * 0.42f).coerceIn(-maxArmedLiftPx, 0f)
                                             } else {
-                                                0f
+                                                targetVisualDragX = 0f
+                                                targetVisualDragY = 0f
                                             }
                                         } else if (gesturesEnabled) {
                                             change.consume()

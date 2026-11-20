@@ -109,6 +109,9 @@ fun LiquidGlassSurface(
                 .background(baseTint)
                 .background(specularBrush)
                 .drawWithCache {
+                    if (size.width <= 0f || size.height <= 0f) {
+                        return@drawWithCache onDrawWithContent { drawContent() }
+                    }
                     val outline = shape.createOutline(size, layoutDirection, this)
                     val borderStroke = Stroke(width = 0.5.dp.toPx())
                     val bottomRim = Color.White.copy(alpha = 0.06f)
@@ -152,6 +155,9 @@ fun PerimeterLoadingRing(
 ) {
     Box(
         modifier = modifier.drawWithCache {
+            if (size.width <= 0f || size.height <= 0f) {
+                return@drawWithCache onDrawBehind {}
+            }
             val strokePx = 2.dp.toPx()
             val inset = strokePx / 2f
             val left = inset

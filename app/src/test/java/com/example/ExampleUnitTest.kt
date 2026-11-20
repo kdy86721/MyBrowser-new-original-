@@ -343,20 +343,18 @@ class ExampleUnitTest {
         )
         assertEquals(listOf("gemini-2.5-flash"), geminiParsed)
 
-        // Customize Claude CLI + temperature clamping + delete protection
+        // Customize Claude CLI + delete protection
         core.selectAiProfile("claude_cli")
         core.updateAiProfile(
             profileId = "claude_cli",
             apiKey = "test-claude-key",
             addCustomModel = "claude-sonnet-4-thinking",
-            temperature = 2.5f, // clamps strictly to 1.0f
             systemPrompt = "3줄 핵심 요약",
         )
         val claude = core.getSnapshot().preferences.activeAiProfile()
         assertEquals("test-claude-key", claude.apiKey)
         assertEquals("claude-sonnet-4-thinking", claude.selectedModel)
         assertTrue("claude-sonnet-4-thinking" in claude.availableModels)
-        assertEquals(1.0f, claude.temperature, 0.001f)
         assertEquals("3줄 핵심 요약", claude.systemPrompt)
 
         core.deleteAiProfile("claude_cli")
@@ -369,7 +367,6 @@ class ExampleUnitTest {
             endpointOrCommand = "http://127.0.0.1:9000/v1/chat/completions",
             apiKey = "bridge-token",
             selectedModel = "deepseek-chat",
-            temperature = 0.7f,
         )
         val customActive = core.getSnapshot().preferences.activeAiProfile()
         assertTrue(customActive.isCustom)
@@ -682,11 +679,11 @@ class ExampleUnitTest {
     }
 
     @Test
-    fun `ai temperature sanitization prevents HTTP 400 over 1_0 and handles reasoning models cleanly`() {
+    fun `ai request payloads omit temperature across all providers and legacy json imports cleanly`() {
         val sampleTurn = listOf(AiChatTurn(isUser = true, text = "요약해줘"))
 
-        // 1. Kimi CLI with out-of-range temperature 1.4f clamps strictly to 1.0
-        val kimiHighTemp = AiCliProfile(
+        // 1. Kimi CLI (chat/completions) omits temperature
+        val kimiProfile = AiCliProfile(
             id = "kimi_cli",
             name = "Kimi CLI",
             cliType = AiCliProfile.CLI_TYPE_KIMI,
@@ -694,13 +691,12 @@ class ExampleUnitTest {
             endpointOrCommand = BrowserPreferences.KIMI_GLOBAL_ENDPOINT,
             apiKey = "sk-kimi",
             selectedModel = "kimi-k2-thinking",
-            temperature = 1.4f,
         )
-        val (_, _, kimiBody) = AiCliHttpClient.buildHttpSpec(kimiHighTemp, kimiHighTemp.endpointOrCommand, sampleTurn)
-        assertTrue(kimiBody.contains("\"temperature\":1.0"))
-        assertFalse(kimiBody.contains("1.4"))
+        val (_, _, kimiBody) = AiCliHttpClient.buildHttpSpec(kimiProfile, kimiProfile.endpointOrCommand, sampleTurn)
+        assertFalse(kimiBody.contains("\"temperature\""))
+        assertTrue(kimiBody.contains("\"model\":\"kimi-k2-thinking\""))
 
-        // 2. OpenAI o3 / o4 reasoning models omit temperature and use developer role
+        // 2. OpenAI o3 reasoning models omit temperature and use developer role
         val o3Profile = AiCliProfile(
             id = "codex_openai_cli",
             name = "Codex / OpenAI CLI",
@@ -708,24 +704,58 @@ class ExampleUnitTest {
             endpointOrCommand = "https://api.openai.com/v1",
             apiKey = "sk-openai",
             selectedModel = "o3-mini",
-            temperature = 0.8f,
         )
         val (_, _, o3Body) = AiCliHttpClient.buildHttpSpec(o3Profile, o3Profile.endpointOrCommand, sampleTurn)
         assertFalse(o3Body.contains("\"temperature\""))
         assertTrue(o3Body.contains("\"role\":\"developer\""))
 
-        // 3. Gemini, Claude, and Ollama also strictly clamp > 1.0 temperatures to 1.0
-        val geminiHigh = AiCliProfile(
+        // 3. Gemini (generateContent) omits temperature
+        val geminiProfile = AiCliProfile(
             id = "gemini_cli",
             name = "Gemini CLI",
             cliType = AiCliProfile.CLI_TYPE_GEMINI,
             endpointOrCommand = "https://generativelanguage.googleapis.com/v1beta",
             apiKey = "gm-key",
             selectedModel = "gemini-2.5-flash",
-            temperature = 1.8f,
         )
-        val (_, _, geminiBody) = AiCliHttpClient.buildHttpSpec(geminiHigh, geminiHigh.endpointOrCommand, sampleTurn)
-        assertTrue(geminiBody.contains("\"temperature\":1.0"))
+        val (_, _, geminiBody) = AiCliHttpClient.buildHttpSpec(geminiProfile, geminiProfile.endpointOrCommand, sampleTurn)
+        assertFalse(geminiBody.contains("\"temperature\""))
+
+        // 4. Claude (messages) omits temperature
+        val claudeProfile = AiCliProfile(
+            id = "claude_cli",
+            name = "Claude CLI",
+            cliType = AiCliProfile.CLI_TYPE_CLAUDE,
+            endpointOrCommand = "https://api.anthropic.com/v1",
+            apiKey = "sk-ant-key",
+            selectedModel = "claude-sonnet-4-20250514",
+        )
+        val (_, _, claudeBody) = AiCliHttpClient.buildHttpSpec(claudeProfile, claudeProfile.endpointOrCommand, sampleTurn)
+        assertFalse(claudeBody.contains("\"temperature\""))
+
+        // 5. Ollama (api/chat) omits temperature
+        val ollamaProfile = AiCliProfile(
+            id = "ollama_cli",
+            name = "Ollama",
+            cliType = AiCliProfile.CLI_TYPE_OLLAMA,
+            endpointOrCommand = "http://127.0.0.1:11434",
+            selectedModel = "llama3.2:latest",
+        )
+        val (_, _, ollamaBody) = AiCliHttpClient.buildHttpSpec(ollamaProfile, ollamaProfile.endpointOrCommand, sampleTurn)
+        assertFalse(ollamaBody.contains("\"temperature\""))
+
+        // 6. Legacy persisted JSON containing "temperature":0.7 imports cleanly without errors
+        val core = LocalKotlinCore()
+        val exported = core.exportStateJson()
+        assertFalse(exported.contains("\"temperature\""))
+        val legacyJsonWithTemp = exported.replaceFirst(
+            "\"selectedModel\":\"\"",
+            "\"selectedModel\":\"\",\"temperature\":0.7",
+        )
+        assertTrue(legacyJsonWithTemp.contains("\"temperature\":0.7"))
+        val restored = LocalKotlinCore()
+        assertTrue(restored.importStateJson(legacyJsonWithTemp))
+        assertEquals(6, restored.getSnapshot().preferences.aiProfiles.size)
     }
 
     @Test
@@ -769,6 +799,75 @@ class ExampleUnitTest {
             "Mozilla/5.0 (Linux; Android 14; Pixel 8 Build/UP1A.231005.007) " +
                 "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.6778.104 Mobile Safari/537.36",
             cleanUa,
+        )
+    }
+
+    @Test
+    fun `foldable long-press swipe split, companion modes, and independent pane operations work cleanly`() {
+        val core = LocalKotlinCore(initialHomeUrl = "https://duckduckgo.com")
+        val defaults = core.getSnapshot().preferences
+        assertTrue(defaults.foldableLongPressSwipeSplitEnabled)
+        assertEquals(BrowserPreferences.FOLDABLE_SPLIT_COMPANION_NEW_TAB, defaults.foldableSplitCompanionMode)
+
+        val tab1 = core.getSnapshot().activeTabId
+        val tab2 = core.createTab("https://kotlinlang.org", activate = true).activeTabId
+        assertEquals(tab1, core.getSnapshot().previousActiveTabId)
+
+        // 1. Companion mode = NEW_TAB (0), swipe LEFT -> active tab (tab2) on Left, brand-new tab on Right
+        val afterLeftSplitNewTab = core.splitTabForFoldable(sourceTabId = tab2, placeSourceOnLeft = true)
+        assertTrue(afterLeftSplitNewTab.preferences.foldableDualPaneEnabled)
+        assertEquals(tab2, afterLeftSplitNewTab.activeTabId)
+        assertNotNull(afterLeftSplitNewTab.secondaryTabId)
+        assertTrue(afterLeftSplitNewTab.secondaryTabId != tab1 && afterLeftSplitNewTab.secondaryTabId != tab2)
+        assertEquals(3, afterLeftSplitNewTab.tabs.size)
+
+        // 2. Close Left pane (keepLeftPane = false) -> Right pane becomes active single-pane tab
+        val keptRightId = afterLeftSplitNewTab.secondaryTabId!!
+        val afterCloseLeft = core.closeSplitPane(keepLeftPane = false)
+        assertFalse(afterCloseLeft.preferences.foldableDualPaneEnabled)
+        assertEquals(keptRightId, afterCloseLeft.activeTabId)
+
+        // 3. Companion mode = PREVIOUS_TAB (1), swipe RIGHT -> active tab on Right, previous tab (tab2) on Left
+        core.updateFoldableSettings(
+            longPressSwipeSplitEnabled = true,
+            splitCompanionMode = BrowserPreferences.FOLDABLE_SPLIT_COMPANION_PREVIOUS_TAB,
+        )
+        core.switchTab(tab1)
+        core.switchTab(tab2) // previousActiveTabId is now tab1
+        val afterRightSplitPrev = core.splitTabForFoldable(sourceTabId = tab2, placeSourceOnLeft = false)
+        assertTrue(afterRightSplitPrev.preferences.foldableDualPaneEnabled)
+        assertEquals(tab1, afterRightSplitPrev.activeTabId) // Left pane = previous tab
+        assertEquals(tab2, afterRightSplitPrev.secondaryTabId) // Right pane = swiped active tab
+
+        // 4. Creating a new tab in Right pane (paneIndex = 1) leaves Left pane untouched
+        val afterRightNewTab = core.createTabForPane(paneIndex = 1, initialUrl = "https://rust-lang.org")
+        assertEquals(tab1, afterRightNewTab.activeTabId)
+        assertEquals("https://rust-lang.org", afterRightNewTab.secondaryTab?.url)
+
+        // 5. Assigning tab2 to Right pane leaves Left pane (tab1) untouched
+        val afterAssignRight = core.assignTabToPane(paneIndex = 1, tabId = tab2)
+        assertEquals(tab1, afterAssignRight.activeTabId)
+        assertEquals(tab2, afterAssignRight.secondaryTabId)
+
+        // 6. JSON roundtrip & reset preserve and restore new foldable fields
+        core.updateFoldableSettings(
+            longPressSwipeSplitEnabled = false,
+            splitCompanionMode = BrowserPreferences.FOLDABLE_SPLIT_COMPANION_PREVIOUS_TAB,
+        )
+        val json = core.exportStateJson()
+        val restored = LocalKotlinCore()
+        assertTrue(restored.importStateJson(json))
+        assertFalse(restored.getSnapshot().preferences.foldableLongPressSwipeSplitEnabled)
+        assertEquals(
+            BrowserPreferences.FOLDABLE_SPLIT_COMPANION_PREVIOUS_TAB,
+            restored.getSnapshot().preferences.foldableSplitCompanionMode,
+        )
+
+        restored.resetFoldableSettings()
+        assertTrue(restored.getSnapshot().preferences.foldableLongPressSwipeSplitEnabled)
+        assertEquals(
+            BrowserPreferences.FOLDABLE_SPLIT_COMPANION_NEW_TAB,
+            restored.getSnapshot().preferences.foldableSplitCompanionMode,
         )
     }
 }

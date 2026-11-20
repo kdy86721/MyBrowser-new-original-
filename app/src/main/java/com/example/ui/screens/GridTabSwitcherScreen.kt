@@ -473,7 +473,7 @@ private fun TabPreviewGridPage(
             key = { it.id },
         ) { tab ->
             val isActive = tab.id == activeTabId
-            val bitmap = thumbnails[tab.id]?.takeIf { !it.isRecycled }
+            val bitmap = thumbnails[tab.id]?.takeIf { !it.isRecycled && it.width > 0 && it.height > 0 }
             val assignedGroup = groupByTabId[tab.id]
             TabPreviewGridCard(
                 tab = tab,
@@ -940,7 +940,7 @@ private fun TabPreviewGridCard(
                     .background(ObsidianVoid),
                 contentAlignment = Alignment.Center,
             ) {
-                if (bitmap != null && !bitmap.isRecycled) {
+                if (bitmap != null && !bitmap.isRecycled && bitmap.width > 0 && bitmap.height > 0) {
                     Image(
                         bitmap = bitmap.asImageBitmap(),
                         contentDescription = "${tab.title.ifBlank { displayHost }} 미리보기",
@@ -1372,10 +1372,12 @@ private fun TabGroupsPage(
                 onCloseTab = onCloseTab,
                 onHeaderAction = if (!isIncognitoGroup) {
                     {
+                        val safeColorIndex = ((groupTitle.hashCode() % TabGroupAccentColors.size) + TabGroupAccentColors.size) %
+                            TabGroupAccentColors.size
                         onCreateTabGroup(
                             groupTitle,
                             groupTabs.map { it.id },
-                            abs(groupTitle.hashCode()) % TabGroupAccentColors.size,
+                            safeColorIndex,
                         )
                     }
                 } else {
@@ -1494,7 +1496,7 @@ private fun TabGroupCard(
         groupTabs.forEach { tab ->
             val isActive = tab.id == activeTabId
             val itemShape = RoundedCornerShape(innerRadius)
-            val bmp = thumbnails[tab.id]?.takeIf { !it.isRecycled }
+            val bmp = thumbnails[tab.id]?.takeIf { !it.isRecycled && it.width > 0 && it.height > 0 }
             Row(
                 modifier = Modifier
                     .fillMaxWidth()

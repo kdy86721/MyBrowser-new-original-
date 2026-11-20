@@ -181,6 +181,8 @@ fun SettingsSheet(
         unfoldedBarWidthFraction: Float?,
         unfoldedBarHorizontalBias: Float?,
         autoExpandToolbarWhenUnfolded: Boolean?,
+        longPressSwipeSplitEnabled: Boolean?,
+        splitCompanionMode: Int?,
     ) -> Unit,
     onResetFoldableSettings: () -> Unit,
     onUpdateGestureSettings: (
@@ -202,7 +204,6 @@ fun SettingsSheet(
         apiKey: String?,
         selectedModel: String?,
         addCustomModel: String?,
-        temperature: Float?,
         systemPrompt: String?,
         providerSubtype: String?,
     ) -> Unit,
@@ -212,7 +213,6 @@ fun SettingsSheet(
         endpointOrCommand: String,
         apiKey: String,
         selectedModel: String,
-        temperature: Float,
     ) -> Unit,
     onDeleteAiProfile: (String) -> Unit,
     onResetCustomization: () -> Unit,
@@ -1391,11 +1391,14 @@ private fun FoldableSettingsPage(
         unfoldedBarWidthFraction: Float?,
         unfoldedBarHorizontalBias: Float?,
         autoExpandToolbarWhenUnfolded: Boolean?,
+        longPressSwipeSplitEnabled: Boolean?,
+        splitCompanionMode: Int?,
     ) -> Unit,
     onResetFoldableSettings: () -> Unit,
 ) {
     val prefs = snapshot.preferences
     val statusShape = RoundedCornerShape(unifiedRadius)
+    val innerRadius = unifiedInnerRadius(unifiedRadius)
 
     // Current Hardware / Layout Posture Banner
     Row(
@@ -1450,12 +1453,118 @@ private fun FoldableSettingsPage(
     SettingsToggleRow(
         icon = Icons.Rounded.ViewColumn,
         title = "듀얼 뷰 화면 분할",
-        subtitle = "펼침 상태에서 두 개의 웹 뷰를 좌우 나란히 표시",
+        subtitle = "펼침 상태에서 두 개의 웹 뷰와 독립 플로팅 바를 좌우 나란히 표시",
         checked = prefs.foldableDualPaneEnabled,
         unifiedRadius = unifiedRadius,
-        onCheckedChange = { onUpdateFoldableSettings(it, null, null, null, null, null) },
+        onCheckedChange = { onUpdateFoldableSettings(it, null, null, null, null, null, null, null) },
         testTag = "toggle_foldable_dual_pane",
     )
+
+    SettingsToggleRow(
+        icon = Icons.Rounded.TouchApp,
+        title = "펼침 화면에서 주소창 롱프레스 후 좌우 스와이프로 화면 분할",
+        subtitle = "주소창을 길게 누른 뒤 왼쪽 또는 오른쪽으로 밀면 현재 페이지를 해당 방향에 배치하고 화면을 분할합니다",
+        checked = prefs.foldableLongPressSwipeSplitEnabled,
+        unifiedRadius = unifiedRadius,
+        onCheckedChange = { onUpdateFoldableSettings(null, null, null, null, null, null, it, null) },
+        testTag = "toggle_foldable_long_press_swipe_split",
+    )
+
+    // Opposite Split Pane Companion Content Selector
+    val companionCardShape = RoundedCornerShape(unifiedRadius)
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(companionCardShape)
+            .background(ObsidianElevated.copy(alpha = 0.65f))
+            .border(0.5.dp, Color.White.copy(alpha = 0.10f), companionCardShape)
+            .padding(14.dp)
+            .testTag("foldable_split_companion_card"),
+        verticalArrangement = Arrangement.spacedBy(10.dp),
+    ) {
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(10.dp),
+        ) {
+            Icon(
+                imageVector = Icons.Rounded.Splitscreen,
+                contentDescription = null,
+                tint = IceCyan,
+                modifier = Modifier.size(20.dp),
+            )
+            Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                Text(
+                    text = "반대편 분할 화면 표시 콘텐츠",
+                    style = MaterialTheme.typography.bodyLarge,
+                    color = PureFrost,
+                )
+                Text(
+                    text = "좌우 스와이프 분할 시 현재 페이지 반대편 영역에 표시할 탭 선택",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = FrostSlate,
+                )
+            }
+        }
+
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            listOf(
+                BrowserPreferences.FOLDABLE_SPLIT_COMPANION_NEW_TAB to "새 탭 표시",
+                BrowserPreferences.FOLDABLE_SPLIT_COMPANION_PREVIOUS_TAB to "이전 탭 표시",
+            ).forEach { (modeCode, label) ->
+                val selected = prefs.foldableSplitCompanionMode == modeCode
+                val chipShape = RoundedCornerShape(innerRadius)
+                Row(
+                    modifier = Modifier
+                        .weight(1f)
+                        .clip(chipShape)
+                        .background(
+                            if (selected) IceCyan.copy(alpha = 0.22f)
+                            else ObsidianVoid.copy(alpha = 0.65f)
+                        )
+                        .border(
+                            width = 0.75.dp,
+                            color = if (selected) IceCyan else Color.White.copy(alpha = 0.12f),
+                            shape = chipShape,
+                        )
+                        .clickable {
+                            onUpdateFoldableSettings(null, null, null, null, null, null, null, modeCode)
+                        }
+                        .padding(horizontal = 10.dp, vertical = 12.dp)
+                        .testTag(
+                            if (modeCode == BrowserPreferences.FOLDABLE_SPLIT_COMPANION_NEW_TAB) {
+                                "foldable_split_companion_new_tab"
+                            } else {
+                                "foldable_split_companion_previous_tab"
+                            }
+                        ),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.Center,
+                ) {
+                    Icon(
+                        imageVector = if (modeCode == BrowserPreferences.FOLDABLE_SPLIT_COMPANION_NEW_TAB) {
+                            Icons.Rounded.Add
+                        } else {
+                            Icons.Rounded.History
+                        },
+                        contentDescription = null,
+                        tint = if (selected) IceCyan else FrostSlate,
+                        modifier = Modifier.size(16.dp),
+                    )
+                    Spacer(Modifier.width(6.dp))
+                    Text(
+                        text = label,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        style = MaterialTheme.typography.labelMedium,
+                        color = if (selected) PureFrost else FrostSlate,
+                    )
+                }
+            }
+        }
+    }
 
     GeometrySliderCard(
         title = "힌지 영역 회피 여백",
@@ -1464,7 +1573,7 @@ private fun FoldableSettingsPage(
         valueRange = 0f..32f,
         unifiedRadius = unifiedRadius,
         testTag = "slider_foldable_hinge_avoidance",
-        onValueChange = { onUpdateFoldableSettings(null, it, null, null, null, null) },
+        onValueChange = { onUpdateFoldableSettings(null, it, null, null, null, null, null, null) },
     )
 
     SettingsToggleRow(
@@ -1473,7 +1582,7 @@ private fun FoldableSettingsPage(
         subtitle = "펼침 화면에서는 별도의 플로팅 바 너비와 한손 위치 프로필 적용",
         checked = prefs.foldableSeparateBarProfiles,
         unifiedRadius = unifiedRadius,
-        onCheckedChange = { onUpdateFoldableSettings(null, null, it, null, null, null) },
+        onCheckedChange = { onUpdateFoldableSettings(null, null, it, null, null, null, null, null) },
         testTag = "toggle_foldable_separate_profiles",
     )
 
@@ -1484,7 +1593,7 @@ private fun FoldableSettingsPage(
         valueRange = 0.40f..1.0f,
         unifiedRadius = unifiedRadius,
         testTag = "slider_unfolded_bar_width",
-        onValueChange = { onUpdateFoldableSettings(null, null, null, it, null, null) },
+        onValueChange = { onUpdateFoldableSettings(null, null, null, it, null, null, null, null) },
     )
 
     val unfoldedBiasLabel = when {
@@ -1499,7 +1608,7 @@ private fun FoldableSettingsPage(
         valueRange = -1f..1f,
         unifiedRadius = unifiedRadius,
         testTag = "slider_unfolded_bar_bias",
-        onValueChange = { onUpdateFoldableSettings(null, null, null, null, it, null) },
+        onValueChange = { onUpdateFoldableSettings(null, null, null, null, it, null, null, null) },
     )
 
     SettingsToggleRow(
@@ -1508,7 +1617,7 @@ private fun FoldableSettingsPage(
         subtitle = "넓은 화면으로 펼칠 때 추가 툴바 단축 아이콘 자동 표시",
         checked = prefs.autoExpandToolbarWhenUnfolded,
         unifiedRadius = unifiedRadius,
-        onCheckedChange = { onUpdateFoldableSettings(null, null, null, null, null, it) },
+        onCheckedChange = { onUpdateFoldableSettings(null, null, null, null, null, it, null, null) },
         testTag = "toggle_foldable_auto_expand_toolbar",
     )
 

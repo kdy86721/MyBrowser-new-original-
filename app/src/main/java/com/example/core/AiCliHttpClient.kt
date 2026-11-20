@@ -23,7 +23,6 @@ import java.net.URL
 import java.net.URLEncoder
 import java.net.UnknownHostException
 import javax.net.ssl.SSLException
-import kotlin.math.roundToInt
 
 data class AiCliResponse(
     val text: String,
@@ -200,23 +199,19 @@ object AiCliHttpClient {
         endpoint: String,
         fallbackModels: List<String>,
     ): List<String> {
-        val probeModel = profile.selectedModel.trim().ifEmpty { fallbackModels.first() }
+        val probeModel = profile.selectedModel.trim().ifEmpty { fallbackModels.firstOrNull().orEmpty() }
         val probeProfile = profile.copy(selectedModel = probeModel)
         val (chatUrl, headers, _) = buildHttpSpec(
             profile = probeProfile,
             cleanEndpoint = endpoint,
             turns = listOf(AiChatTurn(isUser = true, text = "ping")),
         )
-        val probeTemp = sanitizeTemperature(0f, probeProfile.cliType, probeModel)
         val probeBody = buildJsonObject {
             put("model", probeModel)
-            if (isReasoningModelWithoutTemperature(probeProfile.cliType, probeModel)) {
+            if (isOpenAiReasoningModel(probeProfile.cliType, probeModel)) {
                 put("max_completion_tokens", 1)
             } else {
                 put("max_tokens", 1)
-            }
-            if (probeTemp != null) {
-                put("temperature", probeTemp)
             }
             put("messages", buildJsonArray {
                 addJsonObject {
@@ -554,39 +549,16 @@ object AiCliHttpClient {
     }
 
     /**
-     * Detects OpenAI reasoning models (o1 / o3 / o4 series) that reject custom `temperature` values
-     * and expect `developer` instead of `system` role in Chat Completions payloads.
+     * Detects OpenAI reasoning models (o1 / o3 / o4 series) that expect `developer`
+     * instead of `system` role and `max_completion_tokens` in Chat Completions payloads.
      */
-    internal fun isReasoningModelWithoutTemperature(cliType: String, modelName: String): Boolean {
+    internal fun isOpenAiReasoningModel(cliType: String, modelName: String): Boolean {
         val m = modelName.trim().lowercase()
         if (m.isEmpty()) return false
         val isOpenAiSeries = m == "o1" || m.startsWith("o1-") ||
             m == "o3" || m.startsWith("o3-") ||
             m == "o4" || m.startsWith("o4-")
         return isOpenAiSeries && (cliType == AiCliProfile.CLI_TYPE_OPENAI || cliType == AiCliProfile.CLI_TYPE_CUSTOM)
-    }
-
-    /**
-     * Sanitizes and clamps temperature strictly into `[0.0, 1.0]` (rounded to 2 decimal places so
-     * float-to-double rounding never produces `1.0000001`), preventing `HTTP 400: temperature must
-     * not be greater than 1.000000` on Kimi CLI / Moonshot and strict OpenAI-compatible endpoints.
-     * Returns `null` when the target reasoning model rejects the `temperature` parameter.
-     */
-    internal fun sanitizeTemperature(
-        rawTemp: Float,
-        cliType: String,
-        modelName: String,
-    ): Double? {
-        if (isReasoningModelWithoutTemperature(cliType, modelName)) {
-            return null
-        }
-        val m = modelName.trim().lowercase()
-        if (cliType == AiCliProfile.CLI_TYPE_KIMI && m.contains("thinking")) {
-            // kimi-k2-thinking / thinking models strictly require temperature <= 1.0 (recommended 1.0)
-            return ((rawTemp.coerceIn(0f, 1.0f) * 100f).roundToInt() / 100.0).coerceIn(0.0, 1.0)
-        }
-        val clamped = rawTemp.coerceIn(0f, 1.0f)
-        return ((clamped * 100f).roundToInt() / 100.0).coerceIn(0.0, 1.0)
     }
 
     internal fun buildHttpSpec(
@@ -597,7 +569,6 @@ object AiCliHttpClient {
         val trimmed = normalizeBaseUrl(cleanEndpoint)
         val systemText = profile.systemPrompt.ifBlank { AiCliProfile.DEFAULT_AI_SYSTEM_PROMPT }
         val cleanModel = profile.selectedModel.trim().removePrefix("models/")
-        val sanitizedTemp = sanitizeTemperature(profile.temperature, profile.cliType, cleanModel)
         val cleanTurns = turns.filter { it.text.isNotBlank() }
 
         return when (profile.cliType) {
@@ -631,11 +602,6 @@ object AiCliHttpClient {
                             }
                         }
                     })
-                    if (sanitizedTemp != null) {
-                        put("generationConfig", buildJsonObject {
-                            put("temperature", sanitizedTemp)
-                        })
-                    }
                 }.toString()
                 Triple(url, emptyMap(), body)
             }
@@ -655,9 +621,6 @@ object AiCliHttpClient {
                 val body = buildJsonObject {
                     put("model", cleanModel)
                     put("max_tokens", 1400)
-                    if (sanitizedTemp != null) {
-                        put("temperature", sanitizedTemp)
-                    }
                     put("system", systemText)
                     put("messages", buildJsonArray {
                         cleanTurns.forEach { turn ->
@@ -686,11 +649,6 @@ object AiCliHttpClient {
                 val body = buildJsonObject {
                     put("model", cleanModel)
                     put("stream", false)
-                    if (sanitizedTemp != null) {
-                        put("options", buildJsonObject {
-                            put("temperature", sanitizedTemp)
-                        })
-                    }
                     put("messages", buildJsonArray {
                         addJsonObject {
                             put("role", "system")
@@ -726,12 +684,9 @@ object AiCliHttpClient {
                         put("User-Agent", KIMI_CODE_USER_AGENT)
                     }
                 }
-                val isReasoningModel = isReasoningModelWithoutTemperature(profile.cliType, cleanModel)
+                val isReasoningModel = isOpenAiReasoningModel(profile.cliType, cleanModel)
                 val body = buildJsonObject {
                     put("model", cleanModel)
-                    if (sanitizedTemp != null) {
-                        put("temperature", sanitizedTemp)
-                    }
                     put("messages", buildJsonArray {
                         addJsonObject {
                             put("role", if (isReasoningModel) "developer" else "system")

@@ -12,6 +12,7 @@ import android.content.pm.PackageManager
 import android.graphics.Bitmap
 import android.graphics.Canvas
 import android.net.Uri
+import android.net.http.SslError
 import android.os.Build
 import android.os.Bundle
 import android.os.Message
@@ -21,8 +22,10 @@ import android.view.ViewGroup
 import android.webkit.CookieManager
 import android.webkit.GeolocationPermissions
 import android.webkit.PermissionRequest
+import android.webkit.SslErrorHandler
 import android.webkit.ValueCallback
 import android.webkit.WebChromeClient
+import android.webkit.WebResourceError
 import android.webkit.WebResourceRequest
 import android.webkit.WebResourceResponse
 import android.webkit.WebSettings
@@ -33,6 +36,7 @@ import android.widget.FrameLayout
 import android.widget.Toast
 import androidx.core.content.ContextCompat
 import androidx.activity.ComponentActivity
+import androidx.activity.SystemBarStyle
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
@@ -57,6 +61,7 @@ import androidx.compose.animation.slideOutVertically
 import androidx.compose.foundation.background
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxScope
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -65,11 +70,18 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.Stable
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
@@ -83,7 +95,6 @@ import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.TransformOrigin
 import androidx.compose.ui.graphics.graphicsLayer
@@ -136,9 +147,13 @@ import com.example.ui.screens.PageSummarySheet
 import com.example.ui.screens.PageSummaryState
 import com.example.ui.screens.SettingsSheet
 import com.example.storage.BrowserStateStorage
+import com.example.ui.theme.AmberWarn
+import com.example.ui.theme.FrostSlate
 import com.example.ui.theme.IceCyan
 import com.example.ui.theme.MyBrowserTheme
+import com.example.ui.theme.ObsidianElevated
 import com.example.ui.theme.ObsidianVoid
+import com.example.ui.theme.PureFrost
 import com.example.webview.BLOB_DOWNLOAD_JS_BRIDGE_NAME
 import com.example.webview.BlobDownloadBridge
 import com.example.webview.WebViewExternalNavigator
@@ -178,6 +193,51 @@ private enum class PushOverlay {
 }
 
 private class NonObservableFloatRef(var value: Float = 0f)
+
+@Stable
+private class PaneUiState {
+    var isEditingAddress by mutableStateOf(false)
+    var isTabDrawerOpen by mutableStateOf(false)
+    var isFindInPageOpen by mutableStateOf(false)
+    var findQuery by mutableStateOf("")
+    var rawScrollCollapsed by mutableStateOf(false)
+    val scrollDeltaRef = NonObservableFloatRef(0f)
+
+    fun resetScrollCollapse() {
+        rawScrollCollapsed = false
+        scrollDeltaRef.value = 0f
+    }
+
+    fun closeTransientPopups() {
+        isTabDrawerOpen = false
+        isFindInPageOpen = false
+        isEditingAddress = false
+        resetScrollCollapse()
+    }
+
+    fun onScrollDelta(dy: Int, scrollY: Int, isScrollable: Boolean) {
+        if (scrollY <= 0 || !isScrollable) {
+            scrollDeltaRef.value = 0f
+            rawScrollCollapsed = false
+        } else {
+            val fdy = dy.toFloat()
+            if ((fdy > 0f && scrollDeltaRef.value < 0f) ||
+                (fdy < 0f && scrollDeltaRef.value > 0f)
+            ) {
+                scrollDeltaRef.value = fdy
+            } else {
+                scrollDeltaRef.value += fdy
+            }
+            if (scrollDeltaRef.value > 36f) {
+                rawScrollCollapsed = true
+                scrollDeltaRef.value = 0f
+            } else if (scrollDeltaRef.value < -36f) {
+                rawScrollCollapsed = false
+                scrollDeltaRef.value = 0f
+            }
+        }
+    }
+}
 
 private const val MAX_LIVE_WEBVIEWS = 4
 
@@ -412,6 +472,8 @@ class BrowserViewModel(
         unfoldedBarWidthFraction: Float? = null,
         unfoldedBarHorizontalBias: Float? = null,
         autoExpandToolbarWhenUnfolded: Boolean? = null,
+        longPressSwipeSplitEnabled: Boolean? = null,
+        splitCompanionMode: Int? = null,
     ) {
         core.updateFoldableSettings(
             dualPaneEnabled = dualPaneEnabled,
@@ -420,8 +482,32 @@ class BrowserViewModel(
             unfoldedBarWidthFraction = unfoldedBarWidthFraction,
             unfoldedBarHorizontalBias = unfoldedBarHorizontalBias,
             autoExpandToolbarWhenUnfolded = autoExpandToolbarWhenUnfolded,
+            longPressSwipeSplitEnabled = longPressSwipeSplitEnabled,
+            splitCompanionMode = splitCompanionMode,
         )
     }
+
+    fun splitTabForFoldable(sourceTabId: String? = null, placeSourceOnLeft: Boolean): BrowserCoreSnapshot =
+        core.splitTabForFoldable(
+            sourceTabId = sourceTabId,
+            placeSourceOnLeft = placeSourceOnLeft,
+        )
+
+    fun closeSplitPane(keepLeftPane: Boolean): BrowserCoreSnapshot =
+        core.closeSplitPane(keepLeftPane = keepLeftPane)
+
+    fun createTabForPane(
+        paneIndex: Int,
+        initialUrl: String? = null,
+        isIncognito: Boolean = false,
+    ): BrowserCoreSnapshot = core.createTabForPane(
+        paneIndex = paneIndex,
+        initialUrl = initialUrl,
+        isIncognito = isIncognito,
+    )
+
+    fun assignTabToPane(paneIndex: Int, tabId: String): BrowserCoreSnapshot =
+        core.assignTabToPane(paneIndex = paneIndex, tabId = tabId)
 
     fun resetFoldableSettings() {
         core.resetFoldableSettings()
@@ -500,7 +586,6 @@ class BrowserViewModel(
         apiKey: String? = null,
         selectedModel: String? = null,
         addCustomModel: String? = null,
-        temperature: Float? = null,
         systemPrompt: String? = null,
         providerSubtype: String? = null,
     ) {
@@ -511,7 +596,6 @@ class BrowserViewModel(
             apiKey = apiKey,
             selectedModel = selectedModel,
             addCustomModel = addCustomModel,
-            temperature = temperature,
             systemPrompt = systemPrompt,
             providerSubtype = providerSubtype,
         )
@@ -523,7 +607,6 @@ class BrowserViewModel(
         endpointOrCommand: String,
         apiKey: String,
         selectedModel: String,
-        temperature: Float = 0.4f,
     ) {
         core.addCustomAiProfile(
             name = name,
@@ -531,7 +614,6 @@ class BrowserViewModel(
             endpointOrCommand = endpointOrCommand,
             apiKey = apiKey,
             selectedModel = selectedModel,
-            temperature = temperature,
         )
     }
 
@@ -608,7 +690,16 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        enableEdgeToEdge()
+        enableEdgeToEdge(
+            statusBarStyle = SystemBarStyle.auto(
+                android.graphics.Color.TRANSPARENT,
+                android.graphics.Color.TRANSPARENT,
+            ),
+            navigationBarStyle = SystemBarStyle.auto(
+                android.graphics.Color.TRANSPARENT,
+                android.graphics.Color.TRANSPARENT,
+            ),
+        )
         WebViewWarmupPool.schedulePrewarm(applicationContext)
 
         val legacyStateJson = getSharedPreferences(prefsName, MODE_PRIVATE)
@@ -713,17 +804,14 @@ private fun MyBrowserRootScreen(
         }
     }
 
-    var isEditingAddress by remember { mutableStateOf(false) }
-    var isTabDrawerOpen by remember { mutableStateOf(false) }
-    var isGridTabSwitcherOpen by remember { mutableStateOf(false) }
-    var isQuickMenuOpen by remember { mutableStateOf(false) }
-    var isFindInPageOpen by remember { mutableStateOf(false) }
-    var findQuery by remember { mutableStateOf("") }
+    val leftPaneUi = remember { PaneUiState() }
+    val rightPaneUi = remember { PaneUiState() }
+    var gridTabSwitcherPaneIndex by remember { mutableStateOf<Int?>(null) }
+    var quickMenuPaneIndex by remember { mutableStateOf<Int?>(null) }
     var focusedPaneIndex by remember { mutableIntStateOf(0) }
 
-    // Scroll-to-pill state with accumulated >36px hysteresis (non-observable ref avoids per-pixel snapshot churn)
-    var rawScrollCollapsed by remember { mutableStateOf(false) }
-    val scrollDeltaRef = remember { NonObservableFloatRef(0f) }
+    val isQuickMenuOpen = quickMenuPaneIndex != null
+    val isGridTabSwitcherOpen = gridTabSwitcherPaneIndex != null
 
     var activeOverlay by remember { mutableStateOf(PushOverlay.NONE) }
     var openSettingsDirectlyToAi by remember { mutableStateOf(false) }
@@ -733,6 +821,9 @@ private fun MyBrowserRootScreen(
     // Fullscreen HTML5 <video> custom view state
     var fullscreenVideoView by remember { mutableStateOf<View?>(null) }
     var fullscreenVideoCallback by remember { mutableStateOf<WebChromeClient.CustomViewCallback?>(null) }
+
+    // SSL/TLS certificate error confirmation state (strictly defaults to cancel unless user explicitly proceeds)
+    var pendingSslError by remember { mutableStateOf<PendingSslError?>(null) }
 
     // <input type="file"> chooser launcher via SAF (zero storage permissions needed; supports multiple & MIME types)
     var pendingFileCallback by remember { mutableStateOf<ValueCallback<Array<Uri>>?>(null) }
@@ -788,15 +879,27 @@ private fun MyBrowserRootScreen(
         }
     }
 
-    val isBarCollapsed by remember {
+    val isLeftBarCollapsed by remember {
         derivedStateOf {
             snapshotState.value.preferences.scrollToPillEnabled &&
-                rawScrollCollapsed &&
-                !isEditingAddress &&
-                !isQuickMenuOpen &&
-                !isTabDrawerOpen &&
-                !isGridTabSwitcherOpen &&
-                !isFindInPageOpen &&
+                leftPaneUi.rawScrollCollapsed &&
+                !leftPaneUi.isEditingAddress &&
+                quickMenuPaneIndex != 0 &&
+                !leftPaneUi.isTabDrawerOpen &&
+                gridTabSwitcherPaneIndex == null &&
+                !leftPaneUi.isFindInPageOpen &&
+                fullscreenVideoView == null
+        }
+    }
+    val isRightBarCollapsed by remember {
+        derivedStateOf {
+            snapshotState.value.preferences.scrollToPillEnabled &&
+                rightPaneUi.rawScrollCollapsed &&
+                !rightPaneUi.isEditingAddress &&
+                quickMenuPaneIndex != 1 &&
+                !rightPaneUi.isTabDrawerOpen &&
+                gridTabSwitcherPaneIndex == null &&
+                !rightPaneUi.isFindInPageOpen &&
                 fullscreenVideoView == null
         }
     }
@@ -807,19 +910,32 @@ private fun MyBrowserRootScreen(
     val tabThumbnails = remember { mutableStateMapOf<String, Bitmap>() }
 
     fun captureTabThumbnail(tabId: String, wv: WebView?): Bitmap? {
-        if (wv == null || wv.width <= 0 || wv.height <= 0) return null
+        if (wv == null) return null
+        val viewWidth = wv.width
+        val viewHeight = wv.height
+        if (viewWidth <= 0 || viewHeight <= 0) return null
+        val ratio = viewHeight.toFloat() / viewWidth.toFloat()
+        if (!ratio.isFinite() || ratio <= 0f) return null
         val targetWidth = 360
-        val ratio = wv.height.toFloat() / wv.width.toFloat()
         val targetHeight = (targetWidth * ratio).roundToInt().coerceIn(180, 620)
         if (targetWidth <= 0 || targetHeight <= 0) return null
         val captured = runCatching {
             val bmp = Bitmap.createBitmap(targetWidth, targetHeight, Bitmap.Config.RGB_565)
-            val canvas = Canvas(bmp)
-            val scale = targetWidth.toFloat() / wv.width.toFloat()
-            canvas.scale(scale, scale)
-            canvas.translate(-wv.scrollX.toFloat(), -wv.scrollY.toFloat())
-            wv.draw(canvas)
-            bmp
+            try {
+                val canvas = Canvas(bmp)
+                val scale = targetWidth.toFloat() / viewWidth.toFloat()
+                if (!scale.isFinite() || scale <= 0f) {
+                    bmp.recycle()
+                    return@runCatching null
+                }
+                canvas.scale(scale, scale)
+                canvas.translate(-wv.scrollX.toFloat(), -wv.scrollY.toFloat())
+                wv.draw(canvas)
+                bmp
+            } catch (t: Throwable) {
+                if (!bmp.isRecycled) bmp.recycle()
+                throw t
+            }
         }.getOrNull() ?: return null
         tabThumbnails[tabId] = captured
         return captured
@@ -939,9 +1055,11 @@ private fun MyBrowserRootScreen(
         } else {
             fullscreenVideoView = view
             fullscreenVideoCallback = callback
-            isQuickMenuOpen = false
-            isTabDrawerOpen = false
-            isEditingAddress = false
+            quickMenuPaneIndex = null
+            leftPaneUi.isTabDrawerOpen = false
+            leftPaneUi.isEditingAddress = false
+            rightPaneUi.isTabDrawerOpen = false
+            rightPaneUi.isEditingAddress = false
         }
     }
 
@@ -951,27 +1069,24 @@ private fun MyBrowserRootScreen(
         fullscreenVideoView = null
     }
 
-    val onScrollDelta: (Int, Int, Boolean) -> Unit = { dy, scrollY, isScrollable ->
-        if (scrollY <= 0 || !isScrollable) {
-            scrollDeltaRef.value = 0f
-            rawScrollCollapsed = false
-        } else {
-            val fdy = dy.toFloat()
-            if ((fdy > 0f && scrollDeltaRef.value < 0f) ||
-                (fdy < 0f && scrollDeltaRef.value > 0f)
-            ) {
-                scrollDeltaRef.value = fdy
-            } else {
-                scrollDeltaRef.value += fdy
-            }
-            if (scrollDeltaRef.value > 36f) {
-                rawScrollCollapsed = true
-                scrollDeltaRef.value = 0f
-            } else if (scrollDeltaRef.value < -36f) {
-                rawScrollCollapsed = false
-                scrollDeltaRef.value = 0f
-            }
-        }
+    val onSslErrorReceived: (SslErrorHandler, SslError?) -> Unit = { handler, error ->
+        pendingSslError?.let { old -> runCatching { old.handler.cancel() } }
+        val rawUrl = error?.url.orEmpty()
+        val host = runCatching { Uri.parse(rawUrl).host }.getOrNull()
+            ?.takeIf { it.isNotBlank() }
+            ?: rawUrl.ifBlank { "알 수 없는 사이트" }
+        pendingSslError = PendingSslError(
+            host = host,
+            errorCode = error?.primaryError ?: -1,
+            handler = handler,
+        )
+    }
+
+    val onLeftScrollDelta: (Int, Int, Boolean) -> Unit = { dy, scrollY, isScrollable ->
+        leftPaneUi.onScrollDelta(dy, scrollY, isScrollable)
+    }
+    val onRightScrollDelta: (Int, Int, Boolean) -> Unit = { dy, scrollY, isScrollable ->
+        rightPaneUi.onScrollDelta(dy, scrollY, isScrollable)
     }
 
     fun saveAllNonIncognitoWebViews() {
@@ -1030,6 +1145,7 @@ private fun MyBrowserRootScreen(
                 }
                 Lifecycle.Event.ON_PAUSE -> {
                     saveAllNonIncognitoWebViews()
+                    flushCookiesSafely()
                     webViewPool.values.forEach { wv ->
                         wv.onPause()
                     }
@@ -1037,6 +1153,7 @@ private fun MyBrowserRootScreen(
                 }
                 Lifecycle.Event.ON_STOP -> {
                     saveAllNonIncognitoWebViews()
+                    flushCookiesSafely()
                     viewModel.persistConfigSync()
                 }
                 else -> Unit
@@ -1067,6 +1184,8 @@ private fun MyBrowserRootScreen(
 
     DisposableEffect(Unit) {
         onDispose {
+            pendingSslError?.let { runCatching { it.handler.cancel() } }
+            pendingSslError = null
             pendingFileCallback?.onReceiveValue(null)
             pendingFileCallback = null
             pendingWebPermissionRequest?.let { runCatching { it.deny() } }
@@ -1077,6 +1196,7 @@ private fun MyBrowserRootScreen(
             tabLastUsedMs.clear()
             tabScrollPositions.clear()
             saveAllNonIncognitoWebViews()
+            flushCookiesSafely()
             viewModel.persistConfigSync()
             webViewPool.values.forEach { wv ->
                 destroyWebViewCleanly(wv)
@@ -1130,6 +1250,9 @@ private fun MyBrowserRootScreen(
                 viewModel.ensureSecondaryTabForDualPane()
             } else {
                 focusedPaneIndex = 0
+                rightPaneUi.closeTransientPopups()
+                if (quickMenuPaneIndex == 1) quickMenuPaneIndex = null
+                if (gridTabSwitcherPaneIndex == 1) gridTabSwitcherPaneIndex = null
             }
         }
 
@@ -1142,7 +1265,26 @@ private fun MyBrowserRootScreen(
         }
         val focusedTabId = focusedTab?.id ?: snapshot.activeTabId
         val focusedWebView = webViewPool[focusedTabId]
-        val isCurrentUrlBookmarked = snapshot.bookmarks.any { it.url == focusedTab?.url }
+
+        val activeQuickMenuPane = if (isDualPaneActive) (quickMenuPaneIndex ?: focusedPaneIndex) else 0
+        val quickMenuTab = if (isDualPaneActive && activeQuickMenuPane == 1 && secondaryTab != null) {
+            secondaryTab
+        } else {
+            primaryTab
+        }
+        val quickMenuTabId = quickMenuTab?.id ?: snapshot.activeTabId
+        val quickMenuWebView = webViewPool[quickMenuTabId]
+        val quickMenuPaneUi = if (activeQuickMenuPane == 1 && isDualPaneActive) rightPaneUi else leftPaneUi
+        val isQuickMenuUrlBookmarked = snapshot.bookmarks.any { it.url == quickMenuTab?.url }
+
+        val centerHingeGapDp = if (isDualPaneActive) {
+            maxOf(
+                prefs.foldableHingeAvoidanceDp.dp,
+                hingeWidthDp + prefs.foldableHingeAvoidanceDp.dp,
+            ).coerceAtLeast(2.dp)
+        } else {
+            0.dp
+        }
 
         // Pause hidden background tabs, resume visible pane tabs, and apply LRU eviction cap
         LaunchedEffect(snapshot.activeTabId, secondaryTab?.id, isDualPaneActive) {
@@ -1169,13 +1311,29 @@ private fun MyBrowserRootScreen(
             )
         }
 
-        val displaySnapshot = remember(snapshot, focusedTabId) {
-            if (focusedTabId != snapshot.activeTabId) {
-                snapshot.copy(activeTabId = focusedTabId)
-            } else {
-                snapshot
-            }
+        val leftDisplaySnapshot = remember(snapshot, primaryTab?.id) {
+            val targetId = primaryTab?.id ?: snapshot.activeTabId
+            if (targetId != snapshot.activeTabId) snapshot.copy(activeTabId = targetId) else snapshot
         }
+        val rightDisplaySnapshot = remember(snapshot, secondaryTab?.id) {
+            val targetId = secondaryTab?.id ?: snapshot.activeTabId
+            if (targetId != snapshot.activeTabId) snapshot.copy(activeTabId = targetId) else snapshot
+        }
+        val quickMenuDisplaySnapshot = if (activeQuickMenuPane == 1 && isDualPaneActive) {
+            rightDisplaySnapshot
+        } else {
+            leftDisplaySnapshot
+        }
+        val gridSwitcherTargetPane = if (isDualPaneActive) (gridTabSwitcherPaneIndex ?: focusedPaneIndex) else 0
+        val gridSwitcherSnapshot = if (gridSwitcherTargetPane == 1 && isDualPaneActive) {
+            rightDisplaySnapshot
+        } else {
+            leftDisplaySnapshot
+        }
+
+        val anyEditingAddress = leftPaneUi.isEditingAddress || (isDualPaneActive && rightPaneUi.isEditingAddress)
+        val anyFindOrDrawerOpen = leftPaneUi.isFindInPageOpen || leftPaneUi.isTabDrawerOpen ||
+            (isDualPaneActive && (rightPaneUi.isFindInPageOpen || rightPaneUi.isTabDrawerOpen))
 
         // Layered BackHandler Priority 5: WebView back stack (lowest priority)
         BackHandler(
@@ -1183,9 +1341,8 @@ private fun MyBrowserRootScreen(
                 !isQuickMenuOpen &&
                 activeOverlay == PushOverlay.NONE &&
                 !isGridTabSwitcherOpen &&
-                !isEditingAddress &&
-                !isFindInPageOpen &&
-                !isTabDrawerOpen &&
+                !anyEditingAddress &&
+                !anyFindOrDrawerOpen &&
                 focusedTab?.canGoBack == true
         ) {
             webViewPool[focusedTabId]?.let { wv ->
@@ -1201,35 +1358,58 @@ private fun MyBrowserRootScreen(
                 !isQuickMenuOpen &&
                 activeOverlay == PushOverlay.NONE &&
                 !isGridTabSwitcherOpen &&
-                !isEditingAddress &&
-                (isFindInPageOpen || isTabDrawerOpen)
+                !anyEditingAddress &&
+                anyFindOrDrawerOpen
         ) {
+            val targetPaneUi = if (isDualPaneActive && focusedPaneIndex == 1 && (rightPaneUi.isFindInPageOpen || rightPaneUi.isTabDrawerOpen)) {
+                rightPaneUi
+            } else if (leftPaneUi.isFindInPageOpen || leftPaneUi.isTabDrawerOpen) {
+                leftPaneUi
+            } else {
+                rightPaneUi
+            }
+            val targetWebView = if (targetPaneUi === rightPaneUi) {
+                secondaryTab?.id?.let { webViewPool[it] }
+            } else {
+                primaryTab?.id?.let { webViewPool[it] }
+            }
             when {
-                isFindInPageOpen -> {
-                    isFindInPageOpen = false
-                    findQuery = ""
-                    focusedWebView?.clearMatches()
+                targetPaneUi.isFindInPageOpen -> {
+                    targetPaneUi.isFindInPageOpen = false
+                    targetPaneUi.findQuery = ""
+                    targetWebView?.clearMatches()
                 }
-                isTabDrawerOpen -> isTabDrawerOpen = false
+                targetPaneUi.isTabDrawerOpen -> targetPaneUi.isTabDrawerOpen = false
             }
         }
 
-        val onCreateNewWindowTab: (Message) -> Boolean = { resultMsg ->
+        fun createOnNewWindowForPane(paneIndex: Int): (Message) -> Boolean = { resultMsg ->
             val transport = resultMsg.obj as? WebView.WebViewTransport
             if (transport == null) {
                 false
             } else {
-                captureTabThumbnail(focusedTabId, focusedWebView)
-                isTabDrawerOpen = false
-                isGridTabSwitcherOpen = false
-                rawScrollCollapsed = false
-                scrollDeltaRef.value = 0f
-                val nextSnap = viewModel.createTab(initialUrl = "about:blank", isIncognito = false)
-                val newTab = nextSnap.activeTab
+                val targetPaneUi = if (paneIndex == 1 && isDualPaneActive) rightPaneUi else leftPaneUi
+                val sourceTabId = if (paneIndex == 1 && isDualPaneActive) {
+                    secondaryTab?.id ?: snapshot.activeTabId
+                } else {
+                    primaryTab?.id ?: snapshot.activeTabId
+                }
+                captureTabThumbnail(sourceTabId, webViewPool[sourceTabId])
+                targetPaneUi.isTabDrawerOpen = false
+                gridTabSwitcherPaneIndex = null
+                targetPaneUi.resetScrollCollapse()
+                val targetPane = if (isDualPaneActive) paneIndex else 0
+                val nextSnap = viewModel.createTabForPane(
+                    paneIndex = targetPane,
+                    initialUrl = "about:blank",
+                    isIncognito = false,
+                )
+                val newTab = if (targetPane == 1) nextSnap.secondaryTab else nextSnap.activeTab
                 if (newTab == null) {
                     false
                 } else {
-                    focusedPaneIndex = 0
+                    focusedPaneIndex = targetPane
+                    val scrollCallback = if (targetPane == 1) onRightScrollDelta else onLeftScrollDelta
                     val popupWebView = createConfiguredWebView(
                         context = context,
                         tabId = newTab.id,
@@ -1239,7 +1419,7 @@ private fun MyBrowserRootScreen(
                         preferences = nextSnap.preferences,
                         isDesktopMode = newTab.isDesktopMode,
                         viewModel = viewModel,
-                        onScrollDelta = onScrollDelta,
+                        onScrollDelta = scrollCallback,
                         onOpenFileChooser = onOpenFileChooser,
                         onPermissionRequest = onWebPermissionRequest,
                         onGeolocationPrompt = onGeolocationPrompt,
@@ -1249,13 +1429,14 @@ private fun MyBrowserRootScreen(
                                 viewModel = viewModel,
                                 webViewPool = webViewPool,
                                 tabLastUsedMs = tabLastUsedMs,
-                                onScrollDelta = onScrollDelta,
+                                onScrollDelta = scrollCallback,
                                 onOpenFileChooser = onOpenFileChooser,
                                 onPermissionRequest = onWebPermissionRequest,
                                 onGeolocationPrompt = onGeolocationPrompt,
                                 onShowCustomView = onShowFullscreenVideo,
                                 onHideCustomView = onHideFullscreenVideo,
-                                onFocusPrimaryPane = { focusedPaneIndex = 0 },
+                                onSslError = onSslErrorReceived,
+                                onFocusPrimaryPane = { focusedPaneIndex = targetPane },
                                 onCaptureThumbnail = { id, wv -> captureTabThumbnail(id, wv) },
                                 resultMsg = msg,
                             )
@@ -1263,6 +1444,7 @@ private fun MyBrowserRootScreen(
                         onCloseWindow = { wv -> closeWindowByWebView(wv, webViewPool, viewModel) },
                         onShowCustomView = onShowFullscreenVideo,
                         onHideCustomView = onHideFullscreenVideo,
+                        onSslError = onSslErrorReceived,
                         onCaptureThumbnail = { wv -> captureTabThumbnail(newTab.id, wv) },
                     )
                     webViewPool[newTab.id] = popupWebView
@@ -1274,27 +1456,38 @@ private fun MyBrowserRootScreen(
             }
         }
 
-        val switchTabRelative: (Int) -> Unit = { delta ->
+        fun switchTabRelativeForPane(paneIndex: Int, delta: Int) {
             val tabsList = snapshot.tabs
-            if (tabsList.size > 1) {
-                captureTabThumbnail(focusedTabId, focusedWebView)
-                val lastIdx = (tabsList.size - 1).coerceAtLeast(0)
-                val foundIdx = tabsList.indexOfFirst { it.id == focusedTabId }
-                val currentIdx = (if (foundIdx >= 0) foundIdx else 0).coerceIn(0, lastIdx)
-                val targetIdx = (((currentIdx + delta) % tabsList.size + tabsList.size) % tabsList.size)
-                    .coerceIn(0, lastIdx)
-                val targetId = tabsList[targetIdx].id
-                if (isDualPaneActive && focusedPaneIndex == 1 && targetId != snapshot.activeTabId) {
-                    viewModel.setSecondaryTab(targetId)
-                } else {
-                    focusedPaneIndex = 0
-                    viewModel.switchTab(targetId)
-                }
-                isTabDrawerOpen = false
-                isQuickMenuOpen = false
-                rawScrollCollapsed = false
-                scrollDeltaRef.value = 0f
+            if (tabsList.size <= 1) return
+            val effectivePane = if (isDualPaneActive) paneIndex else 0
+            val currentTabId = if (effectivePane == 1) {
+                secondaryTab?.id ?: snapshot.activeTabId
+            } else {
+                primaryTab?.id ?: snapshot.activeTabId
             }
+            val otherPaneTabId = if (isDualPaneActive) {
+                if (effectivePane == 1) primaryTab?.id else secondaryTab?.id
+            } else {
+                null
+            }
+            captureTabThumbnail(currentTabId, webViewPool[currentTabId])
+            val lastIdx = (tabsList.size - 1).coerceAtLeast(0)
+            val foundIdx = tabsList.indexOfFirst { it.id == currentTabId }
+            val currentIdx = (if (foundIdx >= 0) foundIdx else 0).coerceIn(0, lastIdx)
+            var candidateIdx = (((currentIdx + delta) % tabsList.size + tabsList.size) % tabsList.size)
+                .coerceIn(0, lastIdx)
+            // Skip the tab currently displayed in the opposite split pane when 3+ tabs exist
+            if (otherPaneTabId != null && tabsList.size > 2 && tabsList.getOrNull(candidateIdx)?.id == otherPaneTabId) {
+                candidateIdx = (((candidateIdx + delta) % tabsList.size + tabsList.size) % tabsList.size)
+                    .coerceIn(0, lastIdx)
+            }
+            val targetId = tabsList.getOrNull(candidateIdx)?.id ?: return
+            focusedPaneIndex = effectivePane
+            viewModel.assignTabToPane(effectivePane, targetId)
+            val paneUi = if (effectivePane == 1) rightPaneUi else leftPaneUi
+            paneUi.isTabDrawerOpen = false
+            quickMenuPaneIndex = null
+            paneUi.resetScrollCollapse()
         }
 
         val launchAiForSummary: (PageSummaryState, String?) -> Unit = { baseSummary, userQuestion ->
@@ -1344,17 +1537,14 @@ private fun MyBrowserRootScreen(
             }
         }
 
-        val launchAiChatWithUrl: (String) -> Unit = { currentUrl ->
-            isTabDrawerOpen = false
-            isGridTabSwitcherOpen = false
-            isQuickMenuOpen = false
-            isFindInPageOpen = false
-            isEditingAddress = false
-            rawScrollCollapsed = false
-            scrollDeltaRef.value = 0f
+        fun launchAiChatForTab(targetTab: BrowserTabState?, targetWebView: WebView?) {
+            leftPaneUi.closeTransientPopups()
+            rightPaneUi.closeTransientPopups()
+            gridTabSwitcherPaneIndex = null
+            quickMenuPaneIndex = null
 
-            val cleanUrl = currentUrl.trim()
-            val cleanTitle = focusedTab?.title.orEmpty()
+            val cleanUrl = targetTab?.url.orEmpty().trim()
+            val cleanTitle = targetTab?.title.orEmpty()
             val seed = aiChatUiState.sessionSeed + 1
             aiChatUiState = aiChatUiState.copy(
                 sessionSeed = seed,
@@ -1366,9 +1556,9 @@ private fun MyBrowserRootScreen(
             activeOverlay = PushOverlay.AI_CHAT
 
             // Optionally pre-extract visible DOM text in background without blocking or auto-sending
-            if (focusedWebView != null && prefs.javaScriptEnabled) {
+            if (targetWebView != null && prefs.javaScriptEnabled) {
                 extractDomPageSummary(
-                    webView = focusedWebView,
+                    webView = targetWebView,
                     json = summaryJson,
                     fallbackUrl = cleanUrl,
                     fallbackTitle = cleanTitle,
@@ -1431,7 +1621,11 @@ private fun MyBrowserRootScreen(
             }
         }
 
-        val triggerPageSummaryAndAi: (String?) -> Unit = { userQuestion ->
+        fun triggerPageSummaryForTab(
+            targetTab: BrowserTabState?,
+            targetWebView: WebView?,
+            userQuestion: String?,
+        ) {
             val activeProfile = snapshotState.value.preferences.activeAiProfile()
             if (activeOverlay == PushOverlay.SUMMARY &&
                 !pageSummaryState.isLoading &&
@@ -1439,17 +1633,17 @@ private fun MyBrowserRootScreen(
             ) {
                 launchAiForSummary(pageSummaryState, userQuestion)
             } else {
-                val currentUrl = focusedTab?.url.orEmpty()
+                val currentUrl = targetTab?.url.orEmpty()
                 pageSummaryState = PageSummaryState(
                     url = currentUrl,
-                    title = focusedTab?.title.orEmpty(),
+                    title = targetTab?.title.orEmpty(),
                     isLoading = true,
                     aiProfileName = activeProfile.name,
                     aiModel = activeProfile.selectedModel,
                     aiIsLoading = true,
                 )
                 activeOverlay = PushOverlay.SUMMARY
-                if (focusedWebView == null) {
+                if (targetWebView == null) {
                     pageSummaryState = pageSummaryState.copy(
                         isLoading = false,
                         aiIsLoading = false,
@@ -1457,10 +1651,10 @@ private fun MyBrowserRootScreen(
                     )
                 } else {
                     extractDomPageSummary(
-                        webView = focusedWebView,
+                        webView = targetWebView,
                         json = summaryJson,
                         fallbackUrl = currentUrl,
-                        fallbackTitle = focusedTab?.title.orEmpty(),
+                        fallbackTitle = targetTab?.title.orEmpty(),
                     ) { parsed ->
                         if (parsed.errorMessage != null) {
                             pageSummaryState = parsed.copy(
@@ -1476,31 +1670,36 @@ private fun MyBrowserRootScreen(
             }
         }
 
-        val triggerAddressGestureAction: (Int) -> Unit = { action ->
+        fun triggerAddressGestureActionForPane(
+            paneIndex: Int,
+            paneTab: BrowserTabState?,
+            paneUi: PaneUiState,
+            action: Int,
+        ) {
+            val effectivePane = if (isDualPaneActive) paneIndex else 0
+            val tabId = paneTab?.id ?: snapshot.activeTabId
+            val paneWebView = webViewPool[tabId]
+            focusedPaneIndex = effectivePane
             when (action) {
                 BrowserPreferences.GESTURE_OPEN_TABS -> {
-                    captureTabThumbnail(focusedTabId, focusedWebView)
+                    captureTabThumbnail(tabId, paneWebView)
                     if (prefs.tabSwitcherStyle == BrowserPreferences.TAB_SWITCHER_GRID_PREVIEW) {
-                        isTabDrawerOpen = false
-                        isFindInPageOpen = false
-                        isEditingAddress = false
-                        rawScrollCollapsed = false
-                        scrollDeltaRef.value = 0f
-                        isGridTabSwitcherOpen = true
+                        paneUi.closeTransientPopups()
+                        gridTabSwitcherPaneIndex = effectivePane
                     } else {
-                        isGridTabSwitcherOpen = false
-                        isTabDrawerOpen = true
+                        gridTabSwitcherPaneIndex = null
+                        paneUi.isTabDrawerOpen = true
                     }
                 }
                 BrowserPreferences.GESTURE_RELOAD -> {
-                    if (focusedTab?.isLoading == true) {
-                        focusedWebView?.stopLoading()
+                    if (paneTab?.isLoading == true) {
+                        paneWebView?.stopLoading()
                     } else {
-                        focusedWebView?.reload()
+                        paneWebView?.reload()
                     }
                 }
                 BrowserPreferences.GESTURE_SCROLL_TO_TOP -> {
-                    focusedWebView?.let { wv ->
+                    paneWebView?.let { wv ->
                         if (prefs.javaScriptEnabled) {
                             wv.evaluateJavascript(
                                 "window.scrollTo({top: 0, behavior: 'smooth'});",
@@ -1512,26 +1711,23 @@ private fun MyBrowserRootScreen(
                     }
                 }
                 BrowserPreferences.GESTURE_NEW_TAB -> {
-                    captureTabThumbnail(focusedTabId, focusedWebView)
-                    isTabDrawerOpen = false
-                    isGridTabSwitcherOpen = false
-                    rawScrollCollapsed = false
-                    scrollDeltaRef.value = 0f
-                    focusedPaneIndex = 0
-                    viewModel.createTab()
+                    captureTabThumbnail(tabId, paneWebView)
+                    paneUi.isTabDrawerOpen = false
+                    gridTabSwitcherPaneIndex = null
+                    paneUi.resetScrollCollapse()
+                    viewModel.createTabForPane(effectivePane)
                 }
                 BrowserPreferences.GESTURE_QUICK_MENU -> {
-                    isTabDrawerOpen = false
-                    isEditingAddress = false
-                    rawScrollCollapsed = false
-                    scrollDeltaRef.value = 0f
-                    isQuickMenuOpen = true
+                    paneUi.isTabDrawerOpen = false
+                    paneUi.isEditingAddress = false
+                    paneUi.resetScrollCollapse()
+                    quickMenuPaneIndex = effectivePane
                 }
                 BrowserPreferences.GESTURE_BOOKMARK -> {
-                    val url = focusedTab?.url.orEmpty()
+                    val url = paneTab?.url.orEmpty()
                     if (url.isNotBlank()) {
-                        val wasBookmarked = isCurrentUrlBookmarked
-                        viewModel.toggleBookmark(url, focusedTab?.title.orEmpty())
+                        val wasBookmarked = snapshot.bookmarks.any { it.url == url }
+                        viewModel.toggleBookmark(url, paneTab?.title.orEmpty())
                         Toast.makeText(
                             context,
                             if (wasBookmarked) "북마크에서 제거되었습니다." else "북마크에 저장되었습니다.",
@@ -1540,6 +1736,214 @@ private fun MyBrowserRootScreen(
                     }
                 }
                 else -> Unit
+            }
+        }
+
+        fun handleLongPressSwipeSplit(sourceTab: BrowserTabState?, placeSourceOnLeft: Boolean) {
+            if (!isUnfolded || !prefs.foldableLongPressSwipeSplitEnabled) return
+            leftPaneUi.closeTransientPopups()
+            rightPaneUi.closeTransientPopups()
+            quickMenuPaneIndex = null
+            gridTabSwitcherPaneIndex = null
+            val sourceId = sourceTab?.id ?: snapshot.activeTabId
+            captureTabThumbnail(sourceId, webViewPool[sourceId])
+            viewModel.splitTabForFoldable(
+                sourceTabId = sourceId,
+                placeSourceOnLeft = placeSourceOnLeft,
+            )
+            focusedPaneIndex = if (placeSourceOnLeft) 0 else 1
+        }
+
+        @Composable
+        fun BoxScope.PaneFloatingBarOverlay(
+            paneIndex: Int,
+            paneTab: BrowserTabState,
+            paneSnapshot: BrowserCoreSnapshot,
+            paneUi: PaneUiState,
+            isCollapsed: Boolean,
+            isSplitPaneBar: Boolean,
+            paneTagPrefix: String,
+        ) {
+            val paneWebView = webViewPool[paneTab.id]
+
+            // Outside-tap scrim while editing this pane's address bar
+            if (paneUi.isEditingAddress && fullscreenVideoView == null) {
+                Box(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .pointerInput(paneIndex) {
+                            detectTapGestures(
+                                onTap = {
+                                    keyboardController?.hide()
+                                    focusManager.clearFocus(force = true)
+                                    paneUi.isEditingAddress = false
+                                }
+                            )
+                        }
+                        .testTag("${paneTagPrefix}address_editing_outside_scrim")
+                )
+            }
+
+            if (fullscreenVideoView == null) {
+                FloatingControlBar(
+                    snapshot = paneSnapshot,
+                    displayUrl = viewModel.formatDisplayUrl(paneTab.url),
+                    foldablePosture = foldablePosture,
+                    isEditingAddress = paneUi.isEditingAddress,
+                    isTabDrawerOpen = paneUi.isTabDrawerOpen,
+                    isQuickMenuOpen = quickMenuPaneIndex == paneIndex,
+                    isFindInPageOpen = paneUi.isFindInPageOpen,
+                    findQuery = paneUi.findQuery,
+                    isCollapsedToPill = isCollapsed,
+                    isSplitPaneBar = isSplitPaneBar,
+                    paneTagPrefix = paneTagPrefix,
+                    onCloseSplitPane = if (isSplitPaneBar) {
+                        {
+                            leftPaneUi.closeTransientPopups()
+                            rightPaneUi.closeTransientPopups()
+                            quickMenuPaneIndex = null
+                            gridTabSwitcherPaneIndex = null
+                            // Closing Left pane (0) keeps Right pane (keepLeftPane = false); closing Right pane (1) keeps Left pane (keepLeftPane = true)
+                            viewModel.closeSplitPane(keepLeftPane = paneIndex == 1)
+                            focusedPaneIndex = 0
+                        }
+                    } else {
+                        null
+                    },
+                    onEnterAddressEdit = {
+                        focusedPaneIndex = paneIndex
+                        paneUi.isTabDrawerOpen = false
+                        quickMenuPaneIndex = null
+                        paneUi.resetScrollCollapse()
+                        paneUi.isEditingAddress = true
+                    },
+                    onExitAddressEdit = {
+                        paneUi.isEditingAddress = false
+                    },
+                    onSubmitAddress = { rawInput ->
+                        focusedPaneIndex = paneIndex
+                        paneUi.isEditingAddress = false
+                        val targetUrl = viewModel.resolveUrlOrSearch(rawInput)
+                        paneWebView?.loadUrl(targetUrl)
+                    },
+                    onReloadOrStop = {
+                        focusedPaneIndex = paneIndex
+                        if (paneTab.isLoading) {
+                            paneWebView?.stopLoading()
+                        } else {
+                            paneWebView?.reload()
+                        }
+                    },
+                    onToolbarAction = { action ->
+                        focusedPaneIndex = paneIndex
+                        quickMenuPaneIndex = null
+                        when (action) {
+                            ToolbarAction.BACK -> paneWebView?.goBack()
+                            ToolbarAction.FORWARD -> paneWebView?.goForward()
+                            ToolbarAction.RELOAD_OR_STOP -> {
+                                if (paneTab.isLoading) {
+                                    paneWebView?.stopLoading()
+                                } else {
+                                    paneWebView?.reload()
+                                }
+                            }
+                            ToolbarAction.TABS -> {
+                                captureTabThumbnail(paneTab.id, paneWebView)
+                                if (prefs.tabSwitcherStyle == BrowserPreferences.TAB_SWITCHER_GRID_PREVIEW) {
+                                    paneUi.closeTransientPopups()
+                                    gridTabSwitcherPaneIndex = paneIndex
+                                } else {
+                                    gridTabSwitcherPaneIndex = null
+                                    paneUi.isTabDrawerOpen = !paneUi.isTabDrawerOpen
+                                }
+                            }
+                            ToolbarAction.NEW_TAB -> {
+                                captureTabThumbnail(paneTab.id, paneWebView)
+                                paneUi.isTabDrawerOpen = false
+                                gridTabSwitcherPaneIndex = null
+                                paneUi.resetScrollCollapse()
+                                viewModel.createTabForPane(paneIndex)
+                            }
+                            ToolbarAction.HOME -> {
+                                paneWebView?.loadUrl(prefs.homeUrl)
+                            }
+                            ToolbarAction.DESKTOP_MODE -> {
+                                viewModel.toggleDesktopMode(paneTab.id)
+                                paneWebView?.let { wv ->
+                                    val nextDesktop = !paneTab.isDesktopMode
+                                    applyRuntimeWebSettings(wv, prefs, nextDesktop)
+                                    wv.reload()
+                                }
+                            }
+                            ToolbarAction.SHARE -> {
+                                shareUrl(context, paneTab.url, copyToClipboard = false)
+                            }
+                            ToolbarAction.PAGE_SUMMARY -> {
+                                triggerPageSummaryForTab(paneTab, paneWebView, null)
+                            }
+                        }
+                    },
+                    onSwitchTab = { tabId ->
+                        focusedPaneIndex = paneIndex
+                        captureTabThumbnail(paneTab.id, paneWebView)
+                        viewModel.assignTabToPane(paneIndex, tabId)
+                        paneUi.isTabDrawerOpen = false
+                        paneUi.resetScrollCollapse()
+                    },
+                    onCloseTab = { tabId ->
+                        viewModel.closeTab(tabId)
+                    },
+                    onCreateTab = {
+                        focusedPaneIndex = paneIndex
+                        captureTabThumbnail(paneTab.id, paneWebView)
+                        viewModel.createTabForPane(paneIndex)
+                        paneUi.isTabDrawerOpen = false
+                        paneUi.resetScrollCollapse()
+                    },
+                    onToggleQuickMenu = {
+                        focusedPaneIndex = paneIndex
+                        paneUi.isTabDrawerOpen = false
+                        paneUi.isEditingAddress = false
+                        paneUi.resetScrollCollapse()
+                        quickMenuPaneIndex = if (quickMenuPaneIndex == paneIndex) null else paneIndex
+                    },
+                    onFindQueryChange = { q ->
+                        focusedPaneIndex = paneIndex
+                        paneUi.findQuery = q
+                        if (q.isEmpty()) {
+                            paneWebView?.clearMatches()
+                        } else {
+                            paneWebView?.findAllAsync(q)
+                        }
+                    },
+                    onFindNext = { forward ->
+                        focusedPaneIndex = paneIndex
+                        paneWebView?.findNext(forward)
+                    },
+                    onCloseFindInPage = {
+                        paneUi.isFindInPageOpen = false
+                        paneUi.findQuery = ""
+                        paneWebView?.clearMatches()
+                    },
+                    onAddressSwipeUp = {
+                        triggerAddressGestureActionForPane(paneIndex, paneTab, paneUi, prefs.swipeUpAction)
+                    },
+                    onAddressSwipeDown = {
+                        triggerAddressGestureActionForPane(paneIndex, paneTab, paneUi, prefs.swipeDownAction)
+                    },
+                    onAddressSwipeTab = { delta -> switchTabRelativeForPane(paneIndex, delta) },
+                    onAddressDoubleTap = {
+                        triggerAddressGestureActionForPane(paneIndex, paneTab, paneUi, prefs.doubleTapAction)
+                    },
+                    onLongPressSwipeUpAiChat = {
+                        focusedPaneIndex = paneIndex
+                        launchAiChatForTab(paneTab, paneWebView)
+                    },
+                    onLongPressSwipeSplit = { placeCurrentOnLeft ->
+                        handleLongPressSwipeSplit(paneTab, placeCurrentOnLeft)
+                    },
+                    modifier = Modifier.align(Alignment.BottomCenter),
+                )
             }
         }
 
@@ -1558,7 +1962,7 @@ private fun MyBrowserRootScreen(
             label = "browser_push_parallax",
         )
 
-        // 1. Browser Viewport + Floating Bar + Quick-Toggle Dropdown Layer (strictly separated from blur/heavy overlays)
+        // 1. Browser Viewport + Independent Per-Pane Floating Bars + Quick-Toggle Dropdown Layer
         Box(
             modifier = Modifier
                 .fillMaxSize()
@@ -1566,24 +1970,18 @@ private fun MyBrowserRootScreen(
                     translationX = -size.width * 0.25f * parallaxProgressState.value
                 },
         ) {
-            Box(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .padding(
-                        top = prefs.topSafeAreaPaddingDp.dp,
-                        bottom = prefs.bottomSafeAreaPaddingDp.dp,
-                    ),
-            ) {
-                if (isDualPaneActive && primaryTab != null && secondaryTab != null) {
-                    val centerGapDp = maxOf(
-                        prefs.foldableHingeAvoidanceDp.dp,
-                        hingeWidthDp + prefs.foldableHingeAvoidanceDp.dp,
-                    ).coerceAtLeast(2.dp)
-
-                    Row(
+            if (isDualPaneActive && primaryTab != null && secondaryTab != null) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .testTag("dual_pane_container"),
+                ) {
+                    // Left Split Pane (Independent WebView + Independent FloatingControlBar)
+                    Box(
                         modifier = Modifier
-                            .fillMaxSize()
-                            .testTag("dual_pane_container"),
+                            .weight(1f)
+                            .fillMaxHeight()
+                            .testTag("dual_pane_left_container"),
                     ) {
                         key(primaryTab.id) {
                             WebViewPane(
@@ -1596,29 +1994,49 @@ private fun MyBrowserRootScreen(
                                 isDualPane = true,
                                 isFocusedPane = focusedPaneIndex == 0,
                                 onPaneFocused = { focusedPaneIndex = 0 },
-                                onScrollDelta = onScrollDelta,
+                                onScrollDelta = onLeftScrollDelta,
                                 onOpenFileChooser = onOpenFileChooser,
                                 onPermissionRequest = onWebPermissionRequest,
                                 onGeolocationPrompt = onGeolocationPrompt,
-                                onCreateNewWindow = onCreateNewWindowTab,
+                                onCreateNewWindow = createOnNewWindowForPane(0),
                                 onCloseWindow = { wv -> closeWindowByWebView(wv, webViewPool, viewModel) },
                                 onShowCustomView = onShowFullscreenVideo,
                                 onHideCustomView = onHideFullscreenVideo,
+                                onSslError = onSslErrorReceived,
                                 onCaptureThumbnail = { id, wv -> captureTabThumbnail(id, wv) },
                                 modifier = Modifier
-                                    .weight(1f)
-                                    .fillMaxHeight()
+                                    .fillMaxSize()
                                     .testTag("dual_pane_left_webview"),
                             )
                         }
 
-                        Box(
-                            modifier = Modifier
-                                .width(centerGapDp)
-                                .fillMaxHeight()
-                                .background(Color(0xFF050810)),
+                        PaneFloatingBarOverlay(
+                            paneIndex = 0,
+                            paneTab = primaryTab,
+                            paneSnapshot = leftDisplaySnapshot,
+                            paneUi = leftPaneUi,
+                            isCollapsed = isLeftBarCollapsed,
+                            isSplitPaneBar = true,
+                            paneTagPrefix = "left_",
                         )
+                    }
 
+                    // Center Hinge / Gap Divider (respects foldableHingeAvoidanceDp across both WebViews & Bars)
+                    Box(
+                        modifier = Modifier
+                            .width(centerHingeGapDp)
+                            .fillMaxHeight()
+                            .background(Color(0xFF050810))
+                            .testTag("dual_pane_hinge_divider"),
+                    )
+
+                    // Right Split Pane (Independent WebView + Independent FloatingControlBar)
+                    Box(
+                        modifier = Modifier
+                            .weight(1f)
+                            .fillMaxHeight()
+                            .testTag("dual_pane_right_container"),
+                    ) {
                         key(secondaryTab.id) {
                             WebViewPane(
                                 tab = secondaryTab,
@@ -1630,23 +2048,35 @@ private fun MyBrowserRootScreen(
                                 isDualPane = true,
                                 isFocusedPane = focusedPaneIndex == 1,
                                 onPaneFocused = { focusedPaneIndex = 1 },
-                                onScrollDelta = onScrollDelta,
+                                onScrollDelta = onRightScrollDelta,
                                 onOpenFileChooser = onOpenFileChooser,
                                 onPermissionRequest = onWebPermissionRequest,
                                 onGeolocationPrompt = onGeolocationPrompt,
-                                onCreateNewWindow = onCreateNewWindowTab,
+                                onCreateNewWindow = createOnNewWindowForPane(1),
                                 onCloseWindow = { wv -> closeWindowByWebView(wv, webViewPool, viewModel) },
                                 onShowCustomView = onShowFullscreenVideo,
                                 onHideCustomView = onHideFullscreenVideo,
+                                onSslError = onSslErrorReceived,
                                 onCaptureThumbnail = { id, wv -> captureTabThumbnail(id, wv) },
                                 modifier = Modifier
-                                    .weight(1f)
-                                    .fillMaxHeight()
+                                    .fillMaxSize()
                                     .testTag("dual_pane_right_webview"),
                             )
                         }
+
+                        PaneFloatingBarOverlay(
+                            paneIndex = 1,
+                            paneTab = secondaryTab,
+                            paneSnapshot = rightDisplaySnapshot,
+                            paneUi = rightPaneUi,
+                            isCollapsed = isRightBarCollapsed,
+                            isSplitPaneBar = true,
+                            paneTagPrefix = "right_",
+                        )
                     }
-                } else if (primaryTab != null) {
+                }
+            } else if (primaryTab != null) {
+                Box(modifier = Modifier.fillMaxSize()) {
                     key(primaryTab.id) {
                         WebViewPane(
                             tab = primaryTab,
@@ -1658,215 +2088,50 @@ private fun MyBrowserRootScreen(
                             isDualPane = false,
                             isFocusedPane = true,
                             onPaneFocused = { focusedPaneIndex = 0 },
-                            onScrollDelta = onScrollDelta,
+                            onScrollDelta = onLeftScrollDelta,
                             onOpenFileChooser = onOpenFileChooser,
                             onPermissionRequest = onWebPermissionRequest,
                             onGeolocationPrompt = onGeolocationPrompt,
-                            onCreateNewWindow = onCreateNewWindowTab,
+                            onCreateNewWindow = createOnNewWindowForPane(0),
                             onCloseWindow = { wv -> closeWindowByWebView(wv, webViewPool, viewModel) },
                             onShowCustomView = onShowFullscreenVideo,
                             onHideCustomView = onHideFullscreenVideo,
+                            onSslError = onSslErrorReceived,
                             onCaptureThumbnail = { id, wv -> captureTabThumbnail(id, wv) },
                             modifier = Modifier
                                 .fillMaxSize()
                                 .testTag("fullscreen_webview"),
                         )
                     }
+
+                    PaneFloatingBarOverlay(
+                        paneIndex = 0,
+                        paneTab = primaryTab,
+                        paneSnapshot = leftDisplaySnapshot,
+                        paneUi = leftPaneUi,
+                        isCollapsed = isLeftBarCollapsed,
+                        isSplitPaneBar = false,
+                        paneTagPrefix = "",
+                    )
                 }
             }
 
-            // Subtle top status-bar gradient scrim
-            Box(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .statusBarsPadding()
-                    .padding(top = prefs.topSafeAreaPaddingDp.dp)
-                    .height(16.dp)
-                    .align(Alignment.TopCenter)
-                    .background(
-                        Brush.verticalGradient(
-                            listOf(Color.Black.copy(alpha = 0.28f), Color.Transparent)
-                        )
-                    )
-            )
-
-            // Outside-tap scrim while editing the address bar: consumes taps, hides IME, and re-locks capsule
-            if (isEditingAddress && fullscreenVideoView == null) {
-                Box(
-                    modifier = Modifier
-                        .fillMaxSize()
-                        .pointerInput(Unit) {
-                            detectTapGestures(
-                                onTap = {
-                                    keyboardController?.hide()
-                                    focusManager.clearFocus(force = true)
-                                    isEditingAddress = false
-                                }
-                            )
-                        }
-                        .testTag("address_editing_outside_scrim")
-                )
-            }
-
-            // Floating Bottom Control Bar (hidden cleanly during fullscreen HTML5 video playback)
-            if (fullscreenVideoView == null) {
-                FloatingControlBar(
-                    snapshot = displaySnapshot,
-                    displayUrl = viewModel.formatDisplayUrl(focusedTab?.url.orEmpty()),
-                    foldablePosture = foldablePosture,
-                    isEditingAddress = isEditingAddress,
-                    isTabDrawerOpen = isTabDrawerOpen,
-                    isQuickMenuOpen = isQuickMenuOpen,
-                    isFindInPageOpen = isFindInPageOpen,
-                    findQuery = findQuery,
-                    isCollapsedToPill = isBarCollapsed,
-                    onEnterAddressEdit = {
-                        isTabDrawerOpen = false
-                        isQuickMenuOpen = false
-                        rawScrollCollapsed = false
-                        scrollDeltaRef.value = 0f
-                        isEditingAddress = true
-                    },
-                    onExitAddressEdit = {
-                        isEditingAddress = false
-                    },
-                    onSubmitAddress = { rawInput ->
-                        isEditingAddress = false
-                        val targetUrl = viewModel.resolveUrlOrSearch(rawInput)
-                        focusedWebView?.loadUrl(targetUrl)
-                    },
-                    onReloadOrStop = {
-                        if (focusedTab?.isLoading == true) {
-                            focusedWebView?.stopLoading()
-                        } else {
-                            focusedWebView?.reload()
-                        }
-                    },
-                    onToolbarAction = { action ->
-                        isQuickMenuOpen = false
-                        when (action) {
-                            ToolbarAction.BACK -> focusedWebView?.goBack()
-                            ToolbarAction.FORWARD -> focusedWebView?.goForward()
-                            ToolbarAction.RELOAD_OR_STOP -> {
-                                if (focusedTab?.isLoading == true) {
-                                    focusedWebView?.stopLoading()
-                                } else {
-                                    focusedWebView?.reload()
-                                }
-                            }
-                            ToolbarAction.TABS -> {
-                                captureTabThumbnail(focusedTabId, focusedWebView)
-                                if (prefs.tabSwitcherStyle == BrowserPreferences.TAB_SWITCHER_GRID_PREVIEW) {
-                                    isTabDrawerOpen = false
-                                    isFindInPageOpen = false
-                                    isEditingAddress = false
-                                    rawScrollCollapsed = false
-                                    scrollDeltaRef.value = 0f
-                                    isGridTabSwitcherOpen = true
-                                } else {
-                                    isGridTabSwitcherOpen = false
-                                    isTabDrawerOpen = !isTabDrawerOpen
-                                }
-                            }
-                            ToolbarAction.NEW_TAB -> {
-                                captureTabThumbnail(focusedTabId, focusedWebView)
-                                isTabDrawerOpen = false
-                                isGridTabSwitcherOpen = false
-                                rawScrollCollapsed = false
-                                scrollDeltaRef.value = 0f
-                                focusedPaneIndex = 0
-                                viewModel.createTab()
-                            }
-                            ToolbarAction.HOME -> {
-                                focusedWebView?.loadUrl(prefs.homeUrl)
-                            }
-                            ToolbarAction.DESKTOP_MODE -> {
-                                viewModel.toggleDesktopMode(focusedTabId)
-                                focusedWebView?.let { wv ->
-                                    val nextDesktop = !(focusedTab?.isDesktopMode ?: false)
-                                    applyRuntimeWebSettings(wv, prefs, nextDesktop)
-                                    wv.reload()
-                                }
-                            }
-                            ToolbarAction.SHARE -> {
-                                shareUrl(context, focusedTab?.url.orEmpty(), copyToClipboard = false)
-                            }
-                            ToolbarAction.PAGE_SUMMARY -> {
-                                triggerPageSummaryAndAi(null)
-                            }
-                        }
-                    },
-                    onSwitchTab = { tabId ->
-                        captureTabThumbnail(focusedTabId, focusedWebView)
-                        if (isDualPaneActive && focusedPaneIndex == 1 && tabId != snapshot.activeTabId) {
-                            viewModel.setSecondaryTab(tabId)
-                        } else {
-                            focusedPaneIndex = 0
-                            viewModel.switchTab(tabId)
-                        }
-                        isTabDrawerOpen = false
-                        rawScrollCollapsed = false
-                        scrollDeltaRef.value = 0f
-                    },
-                    onCloseTab = { tabId ->
-                        viewModel.closeTab(tabId)
-                    },
-                    onCreateTab = {
-                        captureTabThumbnail(focusedTabId, focusedWebView)
-                        focusedPaneIndex = 0
-                        viewModel.createTab()
-                        isTabDrawerOpen = false
-                        rawScrollCollapsed = false
-                        scrollDeltaRef.value = 0f
-                    },
-                    onToggleQuickMenu = {
-                        isTabDrawerOpen = false
-                        isEditingAddress = false
-                        rawScrollCollapsed = false
-                        scrollDeltaRef.value = 0f
-                        isQuickMenuOpen = !isQuickMenuOpen
-                    },
-                    onFindQueryChange = { q ->
-                        findQuery = q
-                        if (q.isEmpty()) {
-                            focusedWebView?.clearMatches()
-                        } else {
-                            focusedWebView?.findAllAsync(q)
-                        }
-                    },
-                    onFindNext = { forward ->
-                        focusedWebView?.findNext(forward)
-                    },
-                    onCloseFindInPage = {
-                        isFindInPageOpen = false
-                        findQuery = ""
-                        focusedWebView?.clearMatches()
-                    },
-                    onAddressSwipeUp = { triggerAddressGestureAction(prefs.swipeUpAction) },
-                    onAddressSwipeDown = { triggerAddressGestureAction(prefs.swipeDownAction) },
-                    onAddressSwipeTab = { delta -> switchTabRelative(delta) },
-                    onAddressDoubleTap = { triggerAddressGestureAction(prefs.doubleTapAction) },
-                    onLongPressSwipeUpAiChat = {
-                        launchAiChatWithUrl(focusedTab?.url.orEmpty())
-                    },
-                    modifier = Modifier.align(Alignment.BottomCenter),
-                )
-            }
-
-            // Anchored Quick-Toggle Dropdown Menu (with full-screen tap-consuming scrim behind it)
+            // Anchored Quick-Toggle Dropdown Menu (anchored to active pane's gear in dual-pane mode)
             if (fullscreenVideoView == null) {
                 QuickToggleDropdownMenu(
                     visible = isQuickMenuOpen,
-                    snapshot = displaySnapshot,
+                    snapshot = quickMenuDisplaySnapshot,
                     foldablePosture = foldablePosture,
-                    isCurrentUrlBookmarked = isCurrentUrlBookmarked,
-                    onDismiss = { isQuickMenuOpen = false },
+                    isCurrentUrlBookmarked = isQuickMenuUrlBookmarked,
+                    anchorPaneIndex = if (isDualPaneActive) quickMenuPaneIndex else null,
+                    centerHingeGapDp = centerHingeGapDp,
+                    onDismiss = { quickMenuPaneIndex = null },
                     onQuickToggle = { toggle ->
                         when (toggle) {
                             QuickToggleAction.DESKTOP_MODE -> {
-                                viewModel.toggleDesktopMode(focusedTabId)
-                                focusedWebView?.let { wv ->
-                                    val nextDesktop = !(focusedTab?.isDesktopMode ?: false)
+                                viewModel.toggleDesktopMode(quickMenuTabId)
+                                quickMenuWebView?.let { wv ->
+                                    val nextDesktop = !(quickMenuTab?.isDesktopMode ?: false)
                                     applyRuntimeWebSettings(wv, prefs, nextDesktop)
                                     wv.reload()
                                 }
@@ -1882,7 +2147,7 @@ private fun MyBrowserRootScreen(
                             }
                             QuickToggleAction.AD_BLOCK -> {
                                 viewModel.toggleAdBlock()
-                                focusedWebView?.reload()
+                                quickMenuWebView?.reload()
                             }
                             QuickToggleAction.JAVASCRIPT -> {
                                 val nextJs = !prefs.javaScriptEnabled
@@ -1892,7 +2157,7 @@ private fun MyBrowserRootScreen(
                                     val tabDesktop = snapshot.tabs.firstOrNull { it.id == id }?.isDesktopMode == true
                                     applyRuntimeWebSettings(wv, updatedPrefs, tabDesktop)
                                 }
-                                focusedWebView?.reload()
+                                quickMenuWebView?.reload()
                             }
                             QuickToggleAction.BLOCK_IMAGES -> {
                                 val nextBlocked = !prefs.imagesBlocked
@@ -1902,73 +2167,77 @@ private fun MyBrowserRootScreen(
                                     val tabDesktop = snapshot.tabs.firstOrNull { it.id == id }?.isDesktopMode == true
                                     applyRuntimeWebSettings(wv, updatedPrefs, tabDesktop)
                                 }
-                                focusedWebView?.reload()
+                                quickMenuWebView?.reload()
                             }
                             QuickToggleAction.SCROLL_TO_PILL -> {
                                 val nextScroll = !prefs.scrollToPillEnabled
                                 viewModel.setScrollToPillEnabled(nextScroll)
                                 if (!nextScroll) {
-                                    rawScrollCollapsed = false
-                                    scrollDeltaRef.value = 0f
+                                    leftPaneUi.resetScrollCollapse()
+                                    rightPaneUi.resetScrollCollapse()
                                 }
                             }
                             QuickToggleAction.DUAL_PANE -> {
                                 val nextDual = !prefs.foldableDualPaneEnabled
-                                viewModel.updateFoldableSettings(dualPaneEnabled = nextDual)
-                                if (nextDual && !isUnfolded) {
-                                    Toast.makeText(
-                                        context,
-                                        "듀얼 뷰 활성화됨 (펼침 화면에서 좌우 분할 표시)",
-                                        Toast.LENGTH_SHORT,
-                                    ).show()
+                                if (!nextDual && isDualPaneActive) {
+                                    quickMenuPaneIndex = null
+                                    viewModel.closeSplitPane(keepLeftPane = activeQuickMenuPane == 0)
+                                } else {
+                                    viewModel.updateFoldableSettings(dualPaneEnabled = nextDual)
+                                    if (nextDual && !isUnfolded) {
+                                        Toast.makeText(
+                                            context,
+                                            "듀얼 뷰 활성화됨 (펼침 화면에서 좌우 분할 표시)",
+                                            Toast.LENGTH_SHORT,
+                                        ).show()
+                                    }
                                 }
                             }
                             QuickToggleAction.INCOGNITO_TAB -> {
-                                isQuickMenuOpen = false
-                                captureTabThumbnail(focusedTabId, focusedWebView)
-                                if (focusedTab?.isIncognito == true) {
+                                quickMenuPaneIndex = null
+                                captureTabThumbnail(quickMenuTabId, quickMenuWebView)
+                                if (quickMenuTab?.isIncognito == true) {
                                     val nonIncognito = snapshot.tabs.firstOrNull { !it.isIncognito }
                                     if (nonIncognito != null) {
-                                        viewModel.switchTab(nonIncognito.id)
+                                        viewModel.assignTabToPane(activeQuickMenuPane, nonIncognito.id)
                                     } else {
-                                        viewModel.createTab(isIncognito = false)
+                                        viewModel.createTabForPane(activeQuickMenuPane, isIncognito = false)
                                     }
                                 } else {
-                                    viewModel.createTab(isIncognito = true)
+                                    viewModel.createTabForPane(activeQuickMenuPane, isIncognito = true)
                                 }
                             }
                             QuickToggleAction.NEW_TAB -> {
-                                isQuickMenuOpen = false
-                                captureTabThumbnail(focusedTabId, focusedWebView)
-                                focusedPaneIndex = 0
-                                viewModel.createTab(isIncognito = false)
+                                quickMenuPaneIndex = null
+                                captureTabThumbnail(quickMenuTabId, quickMenuWebView)
+                                viewModel.createTabForPane(activeQuickMenuPane, isIncognito = false)
                             }
                             QuickToggleAction.BOOKMARK -> {
-                                val url = focusedTab?.url.orEmpty()
+                                val url = quickMenuTab?.url.orEmpty()
                                 if (url.isNotBlank()) {
-                                    viewModel.toggleBookmark(url, focusedTab?.title.orEmpty())
+                                    viewModel.toggleBookmark(url, quickMenuTab?.title.orEmpty())
                                 }
                             }
                             QuickToggleAction.HISTORY -> {
-                                isQuickMenuOpen = false
+                                quickMenuPaneIndex = null
                                 activeOverlay = PushOverlay.HISTORY
                             }
                             QuickToggleAction.FIND_IN_PAGE -> {
-                                isQuickMenuOpen = false
-                                isFindInPageOpen = true
+                                quickMenuPaneIndex = null
+                                quickMenuPaneUi.isFindInPageOpen = true
                             }
                             QuickToggleAction.PAGE_SUMMARY -> {
-                                isQuickMenuOpen = false
-                                triggerPageSummaryAndAi(null)
+                                quickMenuPaneIndex = null
+                                triggerPageSummaryForTab(quickMenuTab, quickMenuWebView, null)
                             }
                             QuickToggleAction.COPY_AND_SHARE -> {
-                                isQuickMenuOpen = false
-                                shareUrl(context, focusedTab?.url.orEmpty(), copyToClipboard = true)
+                                quickMenuPaneIndex = null
+                                shareUrl(context, quickMenuTab?.url.orEmpty(), copyToClipboard = true)
                             }
                         }
                     },
                     onOpenFullSettings = {
-                        isQuickMenuOpen = false
+                        quickMenuPaneIndex = null
                         openSettingsDirectlyToAi = false
                         activeOverlay = PushOverlay.SETTINGS
                     },
@@ -2022,7 +2291,7 @@ private fun MyBrowserRootScreen(
                         indicatorStyle = indicator,
                     )
                 },
-                onUpdateFoldableSettings = { dual, hinge, sep, width, bias, autoExpand ->
+                onUpdateFoldableSettings = { dual, hinge, sep, width, bias, autoExpand, longPressSplit, companionMode ->
                     viewModel.updateFoldableSettings(
                         dualPaneEnabled = dual,
                         hingeAvoidanceDp = hinge,
@@ -2030,6 +2299,8 @@ private fun MyBrowserRootScreen(
                         unfoldedBarWidthFraction = width,
                         unfoldedBarHorizontalBias = bias,
                         autoExpandToolbarWhenUnfolded = autoExpand,
+                        longPressSwipeSplitEnabled = longPressSplit,
+                        splitCompanionMode = companionMode,
                     )
                 },
                 onResetFoldableSettings = { viewModel.resetFoldableSettings() },
@@ -2049,7 +2320,7 @@ private fun MyBrowserRootScreen(
                 onTestConnectionAndFetchModels = { profile ->
                     viewModel.testConnectionAndFetchModels(profile)
                 },
-                onUpdateAiProfile = { id, name, endpoint, apiKey, model, addModel, temp, prompt, subtype ->
+                onUpdateAiProfile = { id, name, endpoint, apiKey, model, addModel, prompt, subtype ->
                     viewModel.updateAiProfile(
                         profileId = id,
                         name = name,
@@ -2057,19 +2328,17 @@ private fun MyBrowserRootScreen(
                         apiKey = apiKey,
                         selectedModel = model,
                         addCustomModel = addModel,
-                        temperature = temp,
                         systemPrompt = prompt,
                         providerSubtype = subtype,
                     )
                 },
-                onAddCustomAiProfile = { name, cliType, endpoint, apiKey, model, temp ->
+                onAddCustomAiProfile = { name, cliType, endpoint, apiKey, model ->
                     viewModel.addCustomAiProfile(
                         name = name,
                         cliType = cliType,
                         endpointOrCommand = endpoint,
                         apiKey = apiKey,
                         selectedModel = model,
-                        temperature = temp,
                     )
                 },
                 onDeleteAiProfile = { viewModel.deleteAiProfile(it) },
@@ -2082,8 +2351,8 @@ private fun MyBrowserRootScreen(
                 onToggleScrollToPill = { enabled ->
                     viewModel.setScrollToPillEnabled(enabled)
                     if (!enabled) {
-                        rawScrollCollapsed = false
-                        scrollDeltaRef.value = 0f
+                        leftPaneUi.resetScrollCollapse()
+                        rightPaneUi.resetScrollCollapse()
                     }
                 },
                 onToggleExpandBarOnAddressEdit = { enabled ->
@@ -2091,8 +2360,9 @@ private fun MyBrowserRootScreen(
                 },
                 onSelectTabSwitcherStyle = { style ->
                     viewModel.setTabSwitcherStyle(style)
-                    isTabDrawerOpen = false
-                    isGridTabSwitcherOpen = false
+                    leftPaneUi.isTabDrawerOpen = false
+                    rightPaneUi.isTabDrawerOpen = false
+                    gridTabSwitcherPaneIndex = null
                 },
                 onToggleJavaScript = { enabled ->
                     viewModel.setJavaScriptEnabled(enabled)
@@ -2203,7 +2473,7 @@ private fun MyBrowserRootScreen(
                 topSafeAreaPaddingDp = prefs.topSafeAreaPaddingDp.dp,
                 bottomSafeAreaPaddingDp = prefs.bottomSafeAreaPaddingDp.dp,
                 onDismiss = { activeOverlay = PushOverlay.NONE },
-                onAskAiQuestion = { q -> triggerPageSummaryAndAi(q) },
+                onAskAiQuestion = { q -> triggerPageSummaryForTab(focusedTab, focusedWebView, q) },
                 onOpenAiSettings = {
                     openSettingsDirectlyToAi = true
                     activeOverlay = PushOverlay.SETTINGS
@@ -2222,7 +2492,7 @@ private fun MyBrowserRootScreen(
                     .fillMaxSize()
                     .background(Color.Black.copy(alpha = 0.56f))
                     .pointerInput(Unit) {
-                        detectTapGestures(onTap = { activeOverlay = PushOverlay.NONE })
+                        detectTapGestures { /* Consume outside touches; dismiss via Back or header swipe-down */ }
                     }
                     .testTag("ai_chat_modal_backdrop"),
             )
@@ -2319,31 +2589,37 @@ private fun MyBrowserRootScreen(
             exit = fadeOut(tween(180)) + scaleOut(targetScale = 0.96f),
         ) {
             GridTabSwitcherScreen(
-                snapshot = displaySnapshot,
+                snapshot = gridSwitcherSnapshot,
                 thumbnails = tabThumbnails,
                 formatDisplayUrl = { url -> viewModel.formatDisplayUrl(url) },
                 onSelectTab = { tabId ->
-                    captureTabThumbnail(focusedTabId, focusedWebView)
-                    if (isDualPaneActive && focusedPaneIndex == 1 && tabId != snapshot.activeTabId) {
-                        viewModel.setSecondaryTab(tabId)
+                    val targetPane = gridSwitcherTargetPane
+                    val sourceTabId = if (targetPane == 1 && isDualPaneActive) {
+                        secondaryTab?.id ?: snapshot.activeTabId
                     } else {
-                        focusedPaneIndex = 0
-                        viewModel.switchTab(tabId)
+                        primaryTab?.id ?: snapshot.activeTabId
                     }
-                    isGridTabSwitcherOpen = false
-                    rawScrollCollapsed = false
-                    scrollDeltaRef.value = 0f
+                    captureTabThumbnail(sourceTabId, webViewPool[sourceTabId])
+                    focusedPaneIndex = targetPane
+                    viewModel.assignTabToPane(targetPane, tabId)
+                    gridTabSwitcherPaneIndex = null
+                    (if (targetPane == 1 && isDualPaneActive) rightPaneUi else leftPaneUi).resetScrollCollapse()
                 },
                 onCloseTab = { tabId ->
                     viewModel.closeTab(tabId)
                 },
                 onCreateTab = {
-                    captureTabThumbnail(focusedTabId, focusedWebView)
-                    focusedPaneIndex = 0
-                    viewModel.createTab()
-                    isGridTabSwitcherOpen = false
-                    rawScrollCollapsed = false
-                    scrollDeltaRef.value = 0f
+                    val targetPane = gridSwitcherTargetPane
+                    val sourceTabId = if (targetPane == 1 && isDualPaneActive) {
+                        secondaryTab?.id ?: snapshot.activeTabId
+                    } else {
+                        primaryTab?.id ?: snapshot.activeTabId
+                    }
+                    captureTabThumbnail(sourceTabId, webViewPool[sourceTabId])
+                    focusedPaneIndex = targetPane
+                    viewModel.createTabForPane(targetPane)
+                    gridTabSwitcherPaneIndex = null
+                    (if (targetPane == 1 && isDualPaneActive) rightPaneUi else leftPaneUi).resetScrollCollapse()
                 },
                 onCreateTabGroup = { title, tabIds, colorIndex ->
                     viewModel.createTabGroup(title = title, tabIds = tabIds, colorIndex = colorIndex)
@@ -2355,7 +2631,7 @@ private fun MyBrowserRootScreen(
                     viewModel.ungroupTabGroup(groupId)
                 },
                 onDismiss = {
-                    isGridTabSwitcherOpen = false
+                    gridTabSwitcherPaneIndex = null
                 },
             )
         }
@@ -2399,7 +2675,82 @@ private fun MyBrowserRootScreen(
                 )
             }
         }
+        // 7. SSL/TLS Certificate Error Confirmation Dialog (defaults to safe cancel)
+        val activeSslError = pendingSslError
+        if (activeSslError != null) {
+            val dialogShape = RoundedCornerShape(prefs.barCornerRadiusDp.dp)
+            AlertDialog(
+                onDismissRequest = {
+                    runCatching { activeSslError.handler.cancel() }
+                    pendingSslError = null
+                },
+                shape = dialogShape,
+                containerColor = ObsidianElevated,
+                titleContentColor = AmberWarn,
+                textContentColor = PureFrost,
+                title = {
+                    Text(
+                        text = "안전하지 않은 보안 연결",
+                        style = MaterialTheme.typography.titleMedium,
+                        color = AmberWarn,
+                    )
+                },
+                text = {
+                    Text(
+                        text = "${activeSslError.host}\n\n${describeSslErrorReason(activeSslError.errorCode)}\n안전하게 이전 화면으로 돌아가는 것을 권장합니다.",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = FrostSlate,
+                    )
+                },
+                confirmButton = {
+                    Button(
+                        onClick = {
+                            runCatching { activeSslError.handler.cancel() }
+                            pendingSslError = null
+                        },
+                        shape = RoundedCornerShape((prefs.barCornerRadiusDp - 4f).coerceAtLeast(6f).dp),
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = IceCyan,
+                            contentColor = ObsidianVoid,
+                        ),
+                        modifier = Modifier.testTag("ssl_error_cancel_button"),
+                    ) {
+                        Text("안전하게 돌아가기")
+                    }
+                },
+                dismissButton = {
+                    TextButton(
+                        onClick = {
+                            runCatching { activeSslError.handler.proceed() }
+                            pendingSslError = null
+                        },
+                        modifier = Modifier.testTag("ssl_error_proceed_button"),
+                    ) {
+                        Text("위험 감수하고 계속", color = AmberWarn)
+                    }
+                },
+            )
+        }
     }
+}
+
+private data class PendingSslError(
+    val host: String,
+    val errorCode: Int,
+    val handler: SslErrorHandler,
+)
+
+private fun describeSslErrorReason(errorCode: Int): String = when (errorCode) {
+    SslError.SSL_EXPIRED -> "이 사이트의 보안 인증서가 만료되었습니다."
+    SslError.SSL_IDMISMATCH -> "인증서의 도메인 이름이 접속하려는 주소와 일치하지 않습니다."
+    SslError.SSL_UNTRUSTED -> "신뢰할 수 없는 기관에서 발급한 인증서입니다."
+    SslError.SSL_NOTYETVALID -> "아직 유효 기간이 시작되지 않은 인증서입니다."
+    SslError.SSL_DATE_INVALID -> "인증서 날짜가 올바르지 않습니다."
+    else -> "보안 연결(SSL/TLS) 인증서 검증에 실패했습니다."
+}
+
+private fun flushCookiesSafely() {
+    runCatching { CookieManager.getInstance().flush() }
 }
 
 @Composable
@@ -2421,6 +2772,7 @@ private fun WebViewPane(
     onCloseWindow: (WebView?) -> Unit,
     onShowCustomView: (View, WebChromeClient.CustomViewCallback?) -> Unit,
     onHideCustomView: () -> Unit,
+    onSslError: (SslErrorHandler, SslError?) -> Unit,
     onCaptureThumbnail: (tabId: String, webView: WebView) -> Unit,
     modifier: Modifier = Modifier,
 ) {
@@ -2433,11 +2785,13 @@ private fun WebViewPane(
     val latestOnCloseWindow by rememberUpdatedState(onCloseWindow)
     val latestOnShowCustomView by rememberUpdatedState(onShowCustomView)
     val latestOnHideCustomView by rememberUpdatedState(onHideCustomView)
+    val latestOnSslError by rememberUpdatedState(onSslError)
     val latestOnCaptureThumbnail by rememberUpdatedState(onCaptureThumbnail)
 
     DisposableEffect(tab.id) {
         onDispose {
             webViewPool[tab.id]?.let { wv ->
+                wv.setOnTouchListener(null)
                 (wv.parent as? ViewGroup)?.removeView(wv)
             }
         }
@@ -2498,6 +2852,9 @@ private fun WebViewPane(
                         onHideCustomView = {
                             latestOnHideCustomView()
                         },
+                        onSslError = { handler, err ->
+                            latestOnSslError(handler, err)
+                        },
                         onCaptureThumbnail = { wv ->
                             latestOnCaptureThumbnail(tab.id, wv)
                         },
@@ -2555,6 +2912,7 @@ private fun createPopupHelper(
     onGeolocationPrompt: (String, GeolocationPermissions.Callback) -> Unit,
     onShowCustomView: (View, WebChromeClient.CustomViewCallback?) -> Unit,
     onHideCustomView: () -> Unit,
+    onSslError: (SslErrorHandler, SslError?) -> Unit,
     onFocusPrimaryPane: () -> Unit,
     onCaptureThumbnail: (String, WebView) -> Unit,
     resultMsg: Message,
@@ -2588,6 +2946,7 @@ private fun createPopupHelper(
                 onGeolocationPrompt = onGeolocationPrompt,
                 onShowCustomView = onShowCustomView,
                 onHideCustomView = onHideCustomView,
+                onSslError = onSslError,
                 onFocusPrimaryPane = onFocusPrimaryPane,
                 onCaptureThumbnail = onCaptureThumbnail,
                 resultMsg = nestedMsg,
@@ -2596,6 +2955,7 @@ private fun createPopupHelper(
         onCloseWindow = { wv -> closeWindowByWebView(wv, webViewPool, viewModel) },
         onShowCustomView = onShowCustomView,
         onHideCustomView = onHideCustomView,
+        onSslError = onSslError,
         onCaptureThumbnail = { wv -> onCaptureThumbnail(newTab.id, wv) },
     )
     webViewPool[newTab.id] = popupWebView
@@ -2616,15 +2976,22 @@ private fun closeWindowByWebView(
 }
 
 private fun destroyWebViewCleanly(webView: WebView) {
-    (webView.parent as? ViewGroup)?.removeView(webView)
+    runCatching {
+        webView.setOnScrollChangeListener(null)
+        webView.setOnTouchListener(null)
+        webView.setDownloadListener(null)
+        webView.webChromeClient = null
+        webView.webViewClient = WebViewClient()
+    }
+    runCatching { (webView.parent as? ViewGroup)?.removeView(webView) }
     runCatching { webView.removeJavascriptInterface(BLOB_DOWNLOAD_JS_BRIDGE_NAME) }
-    webView.stopLoading()
-    webView.onPause()
-    webView.loadUrl("about:blank")
-    webView.clearFormData()
-    webView.clearHistory()
-    webView.removeAllViews()
-    webView.destroy()
+    runCatching { webView.stopLoading() }
+    runCatching { webView.onPause() }
+    runCatching { webView.loadUrl("about:blank") }
+    runCatching { webView.clearFormData() }
+    runCatching { webView.clearHistory() }
+    runCatching { webView.removeAllViews() }
+    runCatching { webView.destroy() }
 }
 
 private fun shareUrl(
@@ -2817,6 +3184,7 @@ private fun createConfiguredWebView(
     onCloseWindow: (WebView?) -> Unit,
     onShowCustomView: (View, WebChromeClient.CustomViewCallback?) -> Unit,
     onHideCustomView: () -> Unit,
+    onSslError: (SslErrorHandler, SslError?) -> Unit,
     onCaptureThumbnail: (WebView) -> Unit,
 ): WebView {
     var pendingScrollRestore = restoredScrollPosition
@@ -2972,6 +3340,7 @@ private fun createConfiguredWebView(
                         .firstOrNull { it.id == tabId }
                         ?.isIncognito == true
                     if (!isIncognito) {
+                        flushCookiesSafely()
                         runCatching {
                             val bundle = Bundle()
                             view.saveState(bundle)
@@ -2981,6 +3350,35 @@ private fun createConfiguredWebView(
                         }
                     }
                 }
+            }
+
+            override fun onReceivedError(
+                view: WebView?,
+                request: WebResourceRequest?,
+                error: WebResourceError?,
+            ) {
+                super.onReceivedError(view, request, error)
+                if (request?.isForMainFrame == true) {
+                    val resolved = request.url?.toString() ?: view?.url.orEmpty()
+                    viewModel.updateTabNavigation(
+                        tabId = tabId,
+                        url = resolved,
+                        title = view?.title.orEmpty(),
+                        canGoBack = view?.canGoBack() == true,
+                        canGoForward = view?.canGoForward() == true,
+                        isLoading = false,
+                        progress = 100,
+                    )
+                }
+            }
+
+            override fun onReceivedSslError(
+                view: WebView?,
+                handler: SslErrorHandler?,
+                error: SslError?,
+            ) {
+                if (handler == null) return
+                onSslError(handler, error)
             }
         }
 

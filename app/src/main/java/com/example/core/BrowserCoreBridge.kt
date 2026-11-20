@@ -190,7 +190,6 @@ data class AiCliProfile(
     val apiKey: String = "",
     val selectedModel: String = "",
     val availableModels: List<String> = emptyList(),
-    val temperature: Float = 0.4f,
     val systemPrompt: String = DEFAULT_AI_SYSTEM_PROMPT,
     val isCustom: Boolean = false,
 ) {
@@ -243,6 +242,8 @@ data class BrowserPreferences(
     val unfoldedBarWidthFraction: Float = DEFAULT_UNFOLDED_BAR_WIDTH_FRACTION,
     val unfoldedBarHorizontalBias: Float = DEFAULT_UNFOLDED_BAR_HORIZONTAL_BIAS,
     val autoExpandToolbarWhenUnfolded: Boolean = true,
+    val foldableLongPressSwipeSplitEnabled: Boolean = true,
+    val foldableSplitCompanionMode: Int = FOLDABLE_SPLIT_COMPANION_NEW_TAB,
     val expandBarOnAddressEdit: Boolean = DEFAULT_EXPAND_BAR_ON_ADDRESS_EDIT,
     val tabSwitcherStyle: Int = DEFAULT_TAB_SWITCHER_STYLE,
     val gesturesEnabled: Boolean = true,
@@ -274,6 +275,8 @@ data class BrowserPreferences(
         const val DEFAULT_FOLDABLE_HINGE_AVOIDANCE_DP = 12f
         const val DEFAULT_UNFOLDED_BAR_WIDTH_FRACTION = 0.62f
         const val DEFAULT_UNFOLDED_BAR_HORIZONTAL_BIAS = 0f
+        const val FOLDABLE_SPLIT_COMPANION_NEW_TAB = 0
+        const val FOLDABLE_SPLIT_COMPANION_PREVIOUS_TAB = 1
         const val DEFAULT_EXPAND_BAR_ON_ADDRESS_EDIT = true
         const val TAB_SWITCHER_CLASSIC = 0
         const val TAB_SWITCHER_GRID_PREVIEW = 1
@@ -305,7 +308,6 @@ data class BrowserPreferences(
                 apiKey = "",
                 selectedModel = "",
                 availableModels = emptyList(),
-                temperature = 0.4f,
                 systemPrompt = AiCliProfile.DEFAULT_AI_SYSTEM_PROMPT,
                 isCustom = false,
             ),
@@ -318,7 +320,6 @@ data class BrowserPreferences(
                 apiKey = "",
                 selectedModel = "",
                 availableModels = emptyList(),
-                temperature = 0.4f,
                 systemPrompt = AiCliProfile.DEFAULT_AI_SYSTEM_PROMPT,
                 isCustom = false,
             ),
@@ -331,7 +332,6 @@ data class BrowserPreferences(
                 apiKey = "",
                 selectedModel = "",
                 availableModels = emptyList(),
-                temperature = 0.4f,
                 systemPrompt = AiCliProfile.DEFAULT_AI_SYSTEM_PROMPT,
                 isCustom = false,
             ),
@@ -344,7 +344,6 @@ data class BrowserPreferences(
                 apiKey = "",
                 selectedModel = "",
                 availableModels = emptyList(),
-                temperature = 0.4f,
                 systemPrompt = AiCliProfile.DEFAULT_AI_SYSTEM_PROMPT,
                 isCustom = false,
             ),
@@ -357,7 +356,6 @@ data class BrowserPreferences(
                 apiKey = "",
                 selectedModel = "",
                 availableModels = emptyList(),
-                temperature = 0.4f,
                 systemPrompt = AiCliProfile.DEFAULT_AI_SYSTEM_PROMPT,
                 isCustom = false,
             ),
@@ -370,7 +368,6 @@ data class BrowserPreferences(
                 apiKey = "",
                 selectedModel = "",
                 availableModels = emptyList(),
-                temperature = 0.4f,
                 systemPrompt = AiCliProfile.DEFAULT_AI_SYSTEM_PROMPT,
                 isCustom = true,
             ),
@@ -400,6 +397,7 @@ data class BrowserCoreSnapshot(
     val tabs: List<BrowserTabState>,
     val activeTabId: String,
     val secondaryTabId: String? = null,
+    val previousActiveTabId: String? = null,
     val tabGroups: List<TabGroup> = emptyList(),
     val preferences: BrowserPreferences,
     val historyCount: Int,
@@ -420,6 +418,7 @@ data class PersistedCoreState(
     val tabs: List<BrowserTabState>,
     val activeTabId: String,
     val secondaryTabId: String? = null,
+    val previousActiveTabId: String? = null,
     val tabGroups: List<TabGroup> = emptyList(),
     val preferences: BrowserPreferences,
     val history: List<HistoryEntry>,
@@ -457,6 +456,24 @@ interface BrowserCoreBridge {
     fun setSecondaryTab(tabId: String?): BrowserCoreSnapshot
 
     fun ensureSecondaryTabForDualPane(): BrowserCoreSnapshot
+
+    fun splitTabForFoldable(
+        sourceTabId: String? = null,
+        placeSourceOnLeft: Boolean,
+    ): BrowserCoreSnapshot
+
+    fun closeSplitPane(keepLeftPane: Boolean): BrowserCoreSnapshot
+
+    fun createTabForPane(
+        paneIndex: Int,
+        initialUrl: String? = null,
+        isIncognito: Boolean = false,
+    ): BrowserCoreSnapshot
+
+    fun assignTabToPane(
+        paneIndex: Int,
+        tabId: String,
+    ): BrowserCoreSnapshot
 
     fun closeTab(tabId: String): BrowserCoreSnapshot
 
@@ -546,6 +563,8 @@ interface BrowserCoreBridge {
         unfoldedBarWidthFraction: Float? = null,
         unfoldedBarHorizontalBias: Float? = null,
         autoExpandToolbarWhenUnfolded: Boolean? = null,
+        longPressSwipeSplitEnabled: Boolean? = null,
+        splitCompanionMode: Int? = null,
     ): BrowserCoreSnapshot
 
     fun resetBarCustomization(): BrowserCoreSnapshot
@@ -573,7 +592,6 @@ interface BrowserCoreBridge {
         apiKey: String? = null,
         selectedModel: String? = null,
         addCustomModel: String? = null,
-        temperature: Float? = null,
         systemPrompt: String? = null,
         providerSubtype: String? = null,
     ): BrowserCoreSnapshot
@@ -589,7 +607,6 @@ interface BrowserCoreBridge {
         endpointOrCommand: String,
         apiKey: String,
         selectedModel: String,
-        temperature: Float = 0.4f,
         systemPrompt: String = AiCliProfile.DEFAULT_AI_SYSTEM_PROMPT,
         providerSubtype: String = "",
     ): BrowserCoreSnapshot
@@ -783,10 +800,16 @@ class LocalKotlinCore(
                 !activate && current.secondaryTabId == null -> newTab.id
                 else -> updatedTabs.firstOrNull { it.id != nextActive }?.id
             }
+            val nextPreviousActive = if (nextActive != current.activeTabId && updatedTabs.any { it.id == current.activeTabId }) {
+                current.activeTabId
+            } else {
+                current.previousActiveTabId?.takeIf { it != nextActive && updatedTabs.any { t -> t.id == it } }
+            }
             current.copy(
                 tabs = updatedTabs,
                 activeTabId = nextActive,
                 secondaryTabId = nextSecondary,
+                previousActiveTabId = nextPreviousActive,
             )
         }
         _snapshotFlow.value
@@ -806,9 +829,15 @@ class LocalKotlinCore(
                     } else {
                         current.secondaryTabId
                     }
+                    val nextPreviousActive = if (resolvedId != current.activeTabId && current.tabs.any { it.id == current.activeTabId }) {
+                        current.activeTabId
+                    } else {
+                        current.previousActiveTabId?.takeIf { it != resolvedId && current.tabs.any { t -> t.id == it } }
+                    }
                     current.copy(
                         activeTabId = resolvedId,
                         secondaryTabId = nextSecondary,
+                        previousActiveTabId = nextPreviousActive,
                     )
                 } else {
                     current
@@ -856,6 +885,155 @@ class LocalKotlinCore(
             _snapshotFlow.value
         }
 
+    override fun splitTabForFoldable(
+        sourceTabId: String?,
+        placeSourceOnLeft: Boolean,
+    ): BrowserCoreSnapshot = synchronized(lock) {
+        _snapshotFlow.update { current ->
+            if (current.tabs.isEmpty()) return@update current
+            val resolvedSourceId = sourceTabId
+                ?.takeIf { id -> current.tabs.any { it.id == id } }
+                ?: current.activeTab?.id
+                ?: current.tabs.first().id
+
+            val usePreviousMode =
+                current.preferences.foldableSplitCompanionMode == BrowserPreferences.FOLDABLE_SPLIT_COMPANION_PREVIOUS_TAB
+
+            val existingCompanion = if (usePreviousMode) {
+                current.previousActiveTabId
+                    ?.takeIf { prevId -> prevId != resolvedSourceId && current.tabs.any { it.id == prevId } }
+                    ?: current.secondaryTabId
+                        ?.takeIf { secId -> secId != resolvedSourceId && current.tabs.any { it.id == secId } }
+                    ?: current.activeTabId
+                        .takeIf { actId -> actId != resolvedSourceId && current.tabs.any { it.id == actId } }
+                    ?: current.tabs.lastOrNull { it.id != resolvedSourceId }?.id
+            } else {
+                null
+            }
+
+            val updatedTabs: List<BrowserTabState>
+            val companionId: String
+            if (existingCompanion != null) {
+                updatedTabs = current.tabs
+                companionId = existingCompanion
+            } else {
+                val newUrl = current.preferences.homeUrl
+                val companionTab = BrowserTabState(
+                    id = nextTabId(),
+                    url = newUrl,
+                    securityState = classifySecurityInternal(newUrl),
+                )
+                updatedTabs = current.tabs + companionTab
+                companionId = companionTab.id
+            }
+
+            val leftTabId = if (placeSourceOnLeft) resolvedSourceId else companionId
+            val rightTabId = if (placeSourceOnLeft) companionId else resolvedSourceId
+
+            current.copy(
+                tabs = updatedTabs,
+                activeTabId = leftTabId,
+                secondaryTabId = rightTabId,
+                previousActiveTabId = resolvedSourceId.takeIf { it != leftTabId } ?: current.previousActiveTabId,
+                preferences = current.preferences.copy(foldableDualPaneEnabled = true),
+            )
+        }
+        _snapshotFlow.value
+    }
+
+    override fun closeSplitPane(keepLeftPane: Boolean): BrowserCoreSnapshot = synchronized(lock) {
+        _snapshotFlow.update { current ->
+            if (current.tabs.isEmpty()) {
+                return@update current.copy(
+                    preferences = current.preferences.copy(foldableDualPaneEnabled = false)
+                )
+            }
+            val rightId = current.secondaryTab?.id
+            val nextActiveId = if (!keepLeftPane && rightId != null && current.tabs.any { it.id == rightId }) {
+                rightId
+            } else {
+                current.activeTabId
+            }
+            val nextPrevious = if (nextActiveId != current.activeTabId && current.tabs.any { it.id == current.activeTabId }) {
+                current.activeTabId
+            } else {
+                current.secondaryTabId?.takeIf { it != nextActiveId && current.tabs.any { t -> t.id == it } }
+                    ?: current.previousActiveTabId?.takeIf { it != nextActiveId && current.tabs.any { t -> t.id == it } }
+            }
+            current.copy(
+                activeTabId = nextActiveId,
+                previousActiveTabId = nextPrevious,
+                preferences = current.preferences.copy(foldableDualPaneEnabled = false),
+            )
+        }
+        _snapshotFlow.value
+    }
+
+    override fun createTabForPane(
+        paneIndex: Int,
+        initialUrl: String?,
+        isIncognito: Boolean,
+    ): BrowserCoreSnapshot = synchronized(lock) {
+        val url = initialUrl?.takeIf { it.isNotBlank() }?.let { normalizeOrSearch(it) }
+            ?: _snapshotFlow.value.preferences.homeUrl
+        val newTab = BrowserTabState(
+            id = nextTabId(),
+            url = url,
+            securityState = classifySecurityInternal(url),
+            isIncognito = isIncognito,
+        )
+        _snapshotFlow.update { current ->
+            val updatedTabs = current.tabs + newTab
+            if (paneIndex == 1) {
+                current.copy(
+                    tabs = updatedTabs,
+                    secondaryTabId = newTab.id,
+                )
+            } else {
+                val nextPrevious = current.activeTabId.takeIf { it != newTab.id && updatedTabs.any { t -> t.id == it } }
+                val nextSecondary = current.secondaryTabId
+                    ?.takeIf { it != newTab.id && updatedTabs.any { t -> t.id == it } }
+                    ?: updatedTabs.firstOrNull { it.id != newTab.id }?.id
+                current.copy(
+                    tabs = updatedTabs,
+                    activeTabId = newTab.id,
+                    secondaryTabId = nextSecondary,
+                    previousActiveTabId = nextPrevious,
+                )
+            }
+        }
+        _snapshotFlow.value
+    }
+
+    override fun assignTabToPane(
+        paneIndex: Int,
+        tabId: String,
+    ): BrowserCoreSnapshot = synchronized(lock) {
+        if (paneIndex == 0) {
+            return switchTab(tabId)
+        }
+        _snapshotFlow.update { current ->
+            if (current.tabs.none { it.id == tabId }) return@update current
+            if (tabId == current.activeTabId) {
+                val oldSecondary = current.secondaryTabId
+                    ?.takeIf { it != tabId && current.tabs.any { t -> t.id == it } }
+                    ?: current.tabs.firstOrNull { it.id != tabId }?.id
+                if (oldSecondary != null) {
+                    current.copy(
+                        activeTabId = oldSecondary,
+                        secondaryTabId = tabId,
+                        previousActiveTabId = tabId,
+                    )
+                } else {
+                    current
+                }
+            } else {
+                current.copy(secondaryTabId = tabId)
+            }
+        }
+        _snapshotFlow.value
+    }
+
     override fun closeTab(tabId: String): BrowserCoreSnapshot =
         synchronized(lock) {
             _snapshotFlow.update { current ->
@@ -876,6 +1054,7 @@ class LocalKotlinCore(
                         tabs = listOf(freshTab),
                         activeTabId = freshTab.id,
                         secondaryTabId = null,
+                        previousActiveTabId = null,
                         tabGroups = emptyList(),
                     )
                 } else {
@@ -888,10 +1067,13 @@ class LocalKotlinCore(
                     val nextSecondary = current.secondaryTabId
                         ?.takeIf { secId -> secId != tabId && secId != nextActive && remaining.any { it.id == secId } }
                         ?: remaining.firstOrNull { it.id != nextActive }?.id
+                    val nextPrevious = current.previousActiveTabId
+                        ?.takeIf { prevId -> prevId != tabId && prevId != nextActive && remaining.any { it.id == prevId } }
                     current.copy(
                         tabs = remaining,
                         activeTabId = nextActive,
                         secondaryTabId = nextSecondary,
+                        previousActiveTabId = nextPrevious,
                         tabGroups = prunedGroups,
                     )
                 }
@@ -1234,6 +1416,8 @@ class LocalKotlinCore(
         unfoldedBarWidthFraction: Float?,
         unfoldedBarHorizontalBias: Float?,
         autoExpandToolbarWhenUnfolded: Boolean?,
+        longPressSwipeSplitEnabled: Boolean?,
+        splitCompanionMode: Int?,
     ): BrowserCoreSnapshot = synchronized(lock) {
         _snapshotFlow.update { current ->
             val p = current.preferences
@@ -1245,6 +1429,11 @@ class LocalKotlinCore(
                     unfoldedBarWidthFraction = (unfoldedBarWidthFraction ?: p.unfoldedBarWidthFraction).coerceIn(0.40f, 1.0f),
                     unfoldedBarHorizontalBias = (unfoldedBarHorizontalBias ?: p.unfoldedBarHorizontalBias).coerceIn(-1f, 1f),
                     autoExpandToolbarWhenUnfolded = autoExpandToolbarWhenUnfolded ?: p.autoExpandToolbarWhenUnfolded,
+                    foldableLongPressSwipeSplitEnabled = longPressSwipeSplitEnabled ?: p.foldableLongPressSwipeSplitEnabled,
+                    foldableSplitCompanionMode = (splitCompanionMode ?: p.foldableSplitCompanionMode).coerceIn(
+                        BrowserPreferences.FOLDABLE_SPLIT_COMPANION_NEW_TAB,
+                        BrowserPreferences.FOLDABLE_SPLIT_COMPANION_PREVIOUS_TAB,
+                    ),
                 )
             )
         }
@@ -1286,6 +1475,8 @@ class LocalKotlinCore(
                         unfoldedBarWidthFraction = BrowserPreferences.DEFAULT_UNFOLDED_BAR_WIDTH_FRACTION,
                         unfoldedBarHorizontalBias = BrowserPreferences.DEFAULT_UNFOLDED_BAR_HORIZONTAL_BIAS,
                         autoExpandToolbarWhenUnfolded = true,
+                        foldableLongPressSwipeSplitEnabled = true,
+                        foldableSplitCompanionMode = BrowserPreferences.FOLDABLE_SPLIT_COMPANION_NEW_TAB,
                     )
                 )
             }
@@ -1367,7 +1558,6 @@ class LocalKotlinCore(
         apiKey: String?,
         selectedModel: String?,
         addCustomModel: String?,
-        temperature: Float?,
         systemPrompt: String?,
         providerSubtype: String?,
     ): BrowserCoreSnapshot = synchronized(lock) {
@@ -1397,7 +1587,6 @@ class LocalKotlinCore(
                         apiKey = apiKey ?: profile.apiKey,
                         selectedModel = nextSelectedModel,
                         availableModels = ensuredModels,
-                        temperature = (temperature ?: profile.temperature).coerceIn(0f, 1.0f),
                         systemPrompt = systemPrompt ?: profile.systemPrompt,
                     )
                 }
@@ -1421,7 +1610,8 @@ class LocalKotlinCore(
                 } else {
                     val nextSelected = when {
                         cleaned.isEmpty() -> profile.selectedModel
-                        profile.selectedModel.isBlank() || profile.selectedModel !in cleaned -> cleaned.first()
+                        profile.selectedModel.isBlank() || profile.selectedModel !in cleaned ->
+                            cleaned.firstOrNull() ?: profile.selectedModel
                         else -> profile.selectedModel
                     }
                     profile.copy(
@@ -1443,7 +1633,6 @@ class LocalKotlinCore(
         endpointOrCommand: String,
         apiKey: String,
         selectedModel: String,
-        temperature: Float,
         systemPrompt: String,
         providerSubtype: String,
     ): BrowserCoreSnapshot = synchronized(lock) {
@@ -1463,7 +1652,6 @@ class LocalKotlinCore(
             apiKey = apiKey,
             selectedModel = cleanModel,
             availableModels = if (cleanModel.isNotEmpty()) listOf(cleanModel) else emptyList(),
-            temperature = temperature.coerceIn(0f, 1.0f),
             systemPrompt = systemPrompt.ifBlank { AiCliProfile.DEFAULT_AI_SYSTEM_PROMPT },
             isCustom = true,
         )
@@ -1488,7 +1676,7 @@ class LocalKotlinCore(
                 if (!target.isCustom) return@update current
                 val remaining = list.filterNot { it.id == profileId }
                 val nextActiveId = if (current.preferences.activeAiProfileId == profileId) {
-                    remaining.first().id
+                    remaining.firstOrNull()?.id ?: BrowserPreferences.DEFAULT_ACTIVE_AI_PROFILE_ID
                 } else {
                     current.preferences.activeAiProfileId
                 }
@@ -1637,6 +1825,8 @@ class LocalKotlinCore(
             }
             val safeSecondaryId = snap.secondaryTabId
                 ?.takeIf { sec -> sec != safeActiveId && safeTabs.any { it.id == sec } }
+            val safePreviousActiveId = snap.previousActiveTabId
+                ?.takeIf { prev -> prev != safeActiveId && safeTabs.any { it.id == prev } }
             val safeTabIds = safeTabs.map { it.id }.toSet()
             val safeGroups = snap.tabGroups
                 .map { group -> group.copy(tabIds = group.tabIds.filter { it in safeTabIds }.distinct()) }
@@ -1645,6 +1835,7 @@ class LocalKotlinCore(
                 tabs = safeTabs,
                 activeTabId = safeActiveId,
                 secondaryTabId = safeSecondaryId,
+                previousActiveTabId = safePreviousActiveId,
                 tabGroups = safeGroups,
                 preferences = snap.preferences,
                 history = historyBuffer.toList(),
@@ -1668,6 +1859,8 @@ class LocalKotlinCore(
                 val activeId = decoded.tabs[safeActiveIdx].id
                 val secondaryId = decoded.secondaryTabId
                     ?.takeIf { sec -> sec != activeId && decoded.tabs.any { it.id == sec } }
+                val previousActiveId = decoded.previousActiveTabId
+                    ?.takeIf { prev -> prev != activeId && decoded.tabs.any { it.id == prev } }
                 val restoredTabIds = decoded.tabs.map { it.id }.toSet()
                 val safeGroups = decoded.tabGroups
                     .map { group ->
@@ -1687,12 +1880,11 @@ class LocalKotlinCore(
                         }
                         profile.copy(
                             providerSubtype = resolvedSubtype,
-                            temperature = profile.temperature.coerceIn(0f, 1.0f),
                         )
                     }
                 val safeActiveAiId = p.activeAiProfileId.takeIf { id ->
                     safeAiProfiles.any { it.id == id }
-                } ?: safeAiProfiles.first().id
+                } ?: safeAiProfiles.firstOrNull()?.id ?: BrowserPreferences.DEFAULT_ACTIVE_AI_PROFILE_ID
 
                 // Advance ID sequences past restored IDs so cold-restart never generates duplicate keys
                 val maxTabNum = decoded.tabs.mapNotNull { extractNumericSuffix(it.id, "tab_") }.maxOrNull() ?: 0L
@@ -1719,6 +1911,10 @@ class LocalKotlinCore(
                     foldableHingeAvoidanceDp = p.foldableHingeAvoidanceDp.coerceIn(0f, 32f),
                     unfoldedBarWidthFraction = p.unfoldedBarWidthFraction.coerceIn(0.40f, 1.0f),
                     unfoldedBarHorizontalBias = p.unfoldedBarHorizontalBias.coerceIn(-1f, 1f),
+                    foldableSplitCompanionMode = p.foldableSplitCompanionMode.coerceIn(
+                        BrowserPreferences.FOLDABLE_SPLIT_COMPANION_NEW_TAB,
+                        BrowserPreferences.FOLDABLE_SPLIT_COMPANION_PREVIOUS_TAB,
+                    ),
                     tabSwitcherStyle = p.tabSwitcherStyle.coerceIn(
                         BrowserPreferences.TAB_SWITCHER_CLASSIC,
                         BrowserPreferences.TAB_SWITCHER_GRID_PREVIEW,
@@ -1743,6 +1939,7 @@ class LocalKotlinCore(
                     tabs = decoded.tabs.map { it.copy(isLoading = false, progress = 0) },
                     activeTabId = activeId,
                     secondaryTabId = secondaryId,
+                    previousActiveTabId = previousActiveId,
                     tabGroups = safeGroups,
                     preferences = clampedPrefs,
                     historyCount = historyBuffer.size,
@@ -1797,7 +1994,7 @@ class LocalKotlinCore(
         if (host.length < 3 || !host.contains('.')) return false
         if (host.startsWith('.') || host.endsWith('.')) return false
         val labels = host.split('.')
-        val tld = labels.last()
+        val tld = labels.lastOrNull() ?: return false
         if (tld.length < 2 || !tld.all { it.isLetter() }) return false
         return labels.all { label ->
             label.isNotEmpty() &&

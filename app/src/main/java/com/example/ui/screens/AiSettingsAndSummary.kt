@@ -54,8 +54,6 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.OutlinedTextFieldDefaults
-import androidx.compose.material3.Slider
-import androidx.compose.material3.SliderDefaults
 import androidx.compose.material3.Switch
 import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Text
@@ -63,7 +61,6 @@ import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.Immutable
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -559,7 +556,7 @@ fun PageSummarySheet(
 
 /**
  * Korean "AI 설정" Settings sub-page with Multi-AI CLI selection, custom CLI creation/deletion,
- * and dynamic per-AI model, API key, endpoint URL, temperature, and system prompt controls.
+ * and dynamic per-AI model, API key, endpoint URL, and system prompt controls.
  */
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
@@ -577,7 +574,6 @@ fun AiSettingsPage(
         apiKey: String?,
         selectedModel: String?,
         addCustomModel: String?,
-        temperature: Float?,
         systemPrompt: String?,
         providerSubtype: String?,
     ) -> Unit,
@@ -587,7 +583,6 @@ fun AiSettingsPage(
         endpointOrCommand: String,
         apiKey: String,
         selectedModel: String,
-        temperature: Float,
     ) -> Unit,
     onDeleteAiProfile: (String) -> Unit,
 ) {
@@ -682,8 +677,8 @@ fun AiSettingsPage(
             unifiedRadius = unifiedRadius,
             innerRadius = innerRadius,
             onCancel = { showAddForm = false },
-            onAdd = { name, cliType, endpoint, apiKey, model, temp ->
-                onAddCustomAiProfile(name, cliType, endpoint, apiKey, model, temp)
+            onAdd = { name, cliType, endpoint, apiKey, model ->
+                onAddCustomAiProfile(name, cliType, endpoint, apiKey, model)
                 showAddForm = false
             },
         )
@@ -784,7 +779,6 @@ private fun PerAiModelConfigSection(
         apiKey: String?,
         selectedModel: String?,
         addCustomModel: String?,
-        temperature: Float?,
         systemPrompt: String?,
         providerSubtype: String?,
     ) -> Unit,
@@ -884,7 +878,7 @@ private fun PerAiModelConfigSection(
                 onClick = {
                     val cleanKey = apiKeyDraft.trim()
                     val cleanEndpoint = endpointDraft.trim()
-                    onUpdateAiProfile(profile.id, null, cleanEndpoint, cleanKey, null, null, null, null, null)
+                    onUpdateAiProfile(profile.id, null, cleanEndpoint, cleanKey, null, null, null, null)
                     savedBanner = "API 키 저장됨 — 연결 및 모델을 확인합니다."
                     onTestConnectionAndFetchModels(
                         profile.copy(apiKey = cleanKey, endpointOrCommand = cleanEndpoint)
@@ -973,7 +967,6 @@ private fun PerAiModelConfigSection(
                                         null,
                                         null,
                                         null,
-                                        null,
                                         subtype,
                                     )
                                     savedBanner = "Kimi 모드가 '$label'(으)로 변경되었습니다."
@@ -1053,7 +1046,7 @@ private fun PerAiModelConfigSection(
                 onClick = {
                     val cleanEndpoint = endpointDraft.trim()
                     val cleanKey = apiKeyDraft.trim()
-                    onUpdateAiProfile(profile.id, null, cleanEndpoint, cleanKey, null, null, null, null, null)
+                    onUpdateAiProfile(profile.id, null, cleanEndpoint, cleanKey, null, null, null, null)
                     savedBanner = "엔드포인트 저장됨 — 연결 및 모델을 확인합니다."
                     onTestConnectionAndFetchModels(
                         profile.copy(endpointOrCommand = cleanEndpoint, apiKey = cleanKey)
@@ -1071,7 +1064,7 @@ private fun PerAiModelConfigSection(
             onClick = {
                 val cleanEndpoint = endpointDraft.trim()
                 val cleanKey = apiKeyDraft.trim()
-                onUpdateAiProfile(profile.id, null, cleanEndpoint, cleanKey, null, null, null, null, null)
+                onUpdateAiProfile(profile.id, null, cleanEndpoint, cleanKey, null, null, null, null)
                 onTestConnectionAndFetchModels(
                     profile.copy(endpointOrCommand = cleanEndpoint, apiKey = cleanKey)
                 )
@@ -1183,7 +1176,7 @@ private fun PerAiModelConfigSection(
                                 shape = chipShape,
                             )
                             .clickable {
-                                onUpdateAiProfile(profile.id, null, null, null, modelName, null, null, null, null)
+                                onUpdateAiProfile(profile.id, null, null, null, modelName, null, null, null)
                                 savedBanner = "모델이 '$modelName'(으)로 변경되었습니다."
                             }
                             .padding(horizontal = 12.dp, vertical = 8.dp)
@@ -1224,7 +1217,7 @@ private fun PerAiModelConfigSection(
                 onClick = {
                     val trimmed = customModelDraft.trim()
                     if (trimmed.isNotEmpty()) {
-                        onUpdateAiProfile(profile.id, null, null, null, null, trimmed, null, null, null)
+                        onUpdateAiProfile(profile.id, null, null, null, null, trimmed, null, null)
                         customModelDraft = ""
                         savedBanner = "모델 '$trimmed'이(가) 추가 및 선택되었습니다."
                     }
@@ -1234,41 +1227,6 @@ private fun PerAiModelConfigSection(
             ) {
                 Text("적용", style = MaterialTheme.typography.labelMedium, color = IceCyan)
             }
-        }
-
-        // Temperature slider (0.0f..1.0f for Kimi/OpenAI/Claude/Gemini strict API compliance)
-        Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
-            val clampedTemp = profile.temperature.coerceIn(0f, 1.0f)
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.SpaceBetween,
-            ) {
-                Text(
-                    text = "창의성 온도 (Temperature · 0.0~1.0)",
-                    style = MaterialTheme.typography.bodyLarge,
-                    color = PureFrost,
-                )
-                Text(
-                    text = String.format("%.2f", (clampedTemp * 100f).roundToInt() / 100f),
-                    style = MaterialTheme.typography.labelMedium,
-                    color = IceCyan,
-                )
-            }
-            Slider(
-                value = clampedTemp,
-                onValueChange = {
-                    val clean = ((it.coerceIn(0f, 1.0f) * 100f).roundToInt() / 100f).coerceIn(0f, 1.0f)
-                    onUpdateAiProfile(profile.id, null, null, null, null, null, clean, null, null)
-                },
-                valueRange = 0f..1.0f,
-                colors = SliderDefaults.colors(
-                    thumbColor = IceCyan,
-                    activeTrackColor = IceCyan,
-                    inactiveTrackColor = ObsidianVoid,
-                ),
-                modifier = Modifier.testTag("slider_ai_temperature"),
-            )
         }
 
         // System Prompt customization
@@ -1296,7 +1254,7 @@ private fun PerAiModelConfigSection(
             )
             OutlinedButton(
                 onClick = {
-                    onUpdateAiProfile(profile.id, null, null, null, null, null, null, systemPromptDraft, null)
+                    onUpdateAiProfile(profile.id, null, null, null, null, null, systemPromptDraft, null)
                     savedBanner = "시스템 프롬프트가 저장되었습니다."
                 },
                 shape = RoundedCornerShape(innerRadius),
@@ -1327,7 +1285,6 @@ private fun AddCustomAiCliCard(
         endpointOrCommand: String,
         apiKey: String,
         selectedModel: String,
-        temperature: Float,
     ) -> Unit,
 ) {
     val cardShape = RoundedCornerShape(unifiedRadius)
@@ -1336,7 +1293,6 @@ private fun AddCustomAiCliCard(
     var endpoint by remember { mutableStateOf("http://127.0.0.1:8080/v1") }
     var model by remember { mutableStateOf("") }
     var apiKey by remember { mutableStateOf("") }
-    var temperature by remember { mutableFloatStateOf(0.4f) }
 
     Column(
         modifier = Modifier
@@ -1460,7 +1416,6 @@ private fun AddCustomAiCliCard(
                         endpoint,
                         apiKey,
                         model.trim(),
-                        temperature,
                     )
                 },
                 shape = RoundedCornerShape(innerRadius),
