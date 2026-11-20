@@ -849,6 +849,29 @@ class ExampleUnitTest {
         assertEquals(tab1, afterAssignRight.activeTabId)
         assertEquals(tab2, afterAssignRight.secondaryTabId)
 
+        // 5.5 Reverse swipe-to-merge:
+        // Left -> Right merge (keepLeftPane = true) keeps Left tab active and preserves Right tab in open tabs
+        val tabCountBeforeMerge = afterAssignRight.tabs.size
+        val afterMergeKeepLeft = core.closeSplitPane(keepLeftPane = true)
+        assertFalse(afterMergeKeepLeft.preferences.foldableDualPaneEnabled)
+        assertEquals(tab1, afterMergeKeepLeft.activeTabId)
+        assertEquals(tab2, afterMergeKeepLeft.secondaryTabId)
+        assertEquals(tabCountBeforeMerge, afterMergeKeepLeft.tabs.size)
+        assertTrue(afterMergeKeepLeft.tabs.any { it.id == tab1 })
+        assertTrue(afterMergeKeepLeft.tabs.any { it.id == tab2 })
+
+        // Re-split and test Right -> Left merge (keepLeftPane = false): keeps Right tab active & preserves Left tab
+        core.updateFoldableSettings(dualPaneEnabled = true)
+        core.assignTabToPane(paneIndex = 0, tabId = tab1)
+        core.assignTabToPane(paneIndex = 1, tabId = tab2)
+        val afterMergeKeepRight = core.closeSplitPane(keepLeftPane = false)
+        assertFalse(afterMergeKeepRight.preferences.foldableDualPaneEnabled)
+        assertEquals(tab2, afterMergeKeepRight.activeTabId)
+        assertEquals(tab1, afterMergeKeepRight.secondaryTabId)
+        assertEquals(tabCountBeforeMerge, afterMergeKeepRight.tabs.size)
+        assertTrue(afterMergeKeepRight.tabs.any { it.id == tab1 })
+        assertTrue(afterMergeKeepRight.tabs.any { it.id == tab2 })
+
         // 6. JSON roundtrip & reset preserve and restore new foldable fields
         core.updateFoldableSettings(
             longPressSwipeSplitEnabled = false,

@@ -233,6 +233,7 @@ fun FloatingControlBar(
     onAddressDoubleTap: () -> Unit,
     onLongPressSwipeUpAiChat: () -> Unit,
     isSplitPaneBar: Boolean = false,
+    splitPaneSide: Int = 0,
     paneTagPrefix: String = "",
     onCloseSplitPane: (() -> Unit)? = null,
     onLongPressSwipeSplit: ((placeCurrentOnLeft: Boolean) -> Unit)? = null,
@@ -343,7 +344,11 @@ fun FloatingControlBar(
         ) {
             val maxCap = if (foldablePosture.isUnfolded) 740.dp else 640.dp
             val expandedWidth = minOf(maxWidth * effectiveWidthFraction, maxCap)
-            val collapsedPillWidth = minOf(maxWidth, 212.dp)
+            val collapsedPillWidth = if (isSplitPaneBar) {
+                minOf(maxWidth * 0.62f, 180.dp).coerceAtLeast(minOf(maxWidth, 148.dp))
+            } else {
+                minOf(maxWidth, 212.dp)
+            }
             val isExpandedAddressEdit = isEditingAddress && prefs.expandBarOnAddressEdit
             val targetBarWidth = when {
                 effectiveCollapsed -> collapsedPillWidth
@@ -449,7 +454,15 @@ fun FloatingControlBar(
                             swipeLeftRightTabSwitch = prefs.swipeLeftRightTabSwitch,
                             doubleTapAction = prefs.doubleTapAction,
                             longPressSwipeUpAiChatEnabled = prefs.longPressSwipeUpAiChatEnabled,
-                            longPressSwipeSplitEnabled = foldablePosture.isUnfolded && prefs.foldableLongPressSwipeSplitEnabled,
+                            longPressSwipeSplitEnabled = foldablePosture.isUnfolded &&
+                                (prefs.foldableLongPressSwipeSplitEnabled || isSplitPaneBar),
+                            allowedLongPressHorizontalDirection = if (!isSplitPaneBar) {
+                                0
+                            } else if (splitPaneSide == 0) {
+                                1 // Left split pane merges by swiping right
+                            } else {
+                                -1 // Right split pane merges by swiping left
+                            },
                             gestureSensitivityDp = prefs.gestureSensitivityDp,
                             onTapToEdit = onEnterAddressEdit,
                             onExitEdit = onExitAddressEdit,
@@ -531,7 +544,7 @@ fun FloatingControlBar(
                         cornerRadius = unifiedRadius,
                         modifier = Modifier
                             .matchParentSize()
-                            .testTag("perimeter_loading_ring"),
+                            .testTag("${paneTagPrefix}perimeter_loading_ring"),
                     )
                 }
             }
@@ -1244,6 +1257,7 @@ private fun AddressCapsule(
     doubleTapAction: Int,
     longPressSwipeUpAiChatEnabled: Boolean,
     longPressSwipeSplitEnabled: Boolean = false,
+    allowedLongPressHorizontalDirection: Int = 0,
     gestureSensitivityDp: Float,
     onTapToEdit: () -> Unit,
     onExitEdit: () -> Unit,
@@ -1419,6 +1433,7 @@ private fun AddressCapsule(
                             doubleTapAction,
                             longPressSwipeUpAiChatEnabled,
                             canLongPressSplit,
+                            allowedLongPressHorizontalDirection,
                             sensitivityPx,
                         ) {
                             awaitEachGesture {
@@ -1515,6 +1530,11 @@ private fun AddressCapsule(
                                                 isLongPressArmed = false
                                                 targetVisualDragX = 0f
                                                 targetVisualDragY = 0f
+                                                val horizontalDirectionAllowed = when {
+                                                    allowedLongPressHorizontalDirection > 0 -> totalDx > 0f
+                                                    allowedLongPressHorizontalDirection < 0 -> totalDx < 0f
+                                                    else -> true
+                                                }
                                                 if (longPressSwipeUpAiChatEnabled &&
                                                     totalDy < -sensitivityPx &&
                                                     abs(totalDy) >= abs(totalDx)
@@ -1522,12 +1542,16 @@ private fun AddressCapsule(
                                                     change?.consume()
                                                     latestOnLongPressSwipeUpAiChat()
                                                 } else if (canLongPressSplit &&
+                                                    horizontalDirectionAllowed &&
                                                     abs(totalDx) > sensitivityPx &&
                                                     abs(totalDx) > abs(totalDy)
                                                 ) {
                                                     change?.consume()
                                                     latestOnLongPressSwipeSplit?.invoke(totalDx < 0f)
-                                                } else if (change != null && !change.isConsumed) {
+                                                } else if (change != null &&
+                                                    !change.isConsumed &&
+                                                    hypot(totalDx, totalDy) <= touchSlop
+                                                ) {
                                                     change.consume()
                                                     latestOnTapToEdit()
                                                 }
@@ -1557,7 +1581,15 @@ private fun AddressCapsule(
                                         totalDy += delta.y
                                         if (armedLongPress) {
                                             change.consume()
-                                            if (canLongPressSplit && abs(totalDx) > abs(totalDy)) {
+                                            val horizontalDragAllowed = when {
+                                                allowedLongPressHorizontalDirection > 0 -> totalDx > 0f
+                                                allowedLongPressHorizontalDirection < 0 -> totalDx < 0f
+                                                else -> true
+                                            }
+                                            if (canLongPressSplit &&
+                                                horizontalDragAllowed &&
+                                                abs(totalDx) > abs(totalDy)
+                                            ) {
                                                 targetVisualDragY = 0f
                                                 targetVisualDragX = (totalDx * 0.42f).coerceIn(-maxVisualDragPx, maxVisualDragPx)
                                             } else if (longPressSwipeUpAiChatEnabled && totalDy < 0f) {

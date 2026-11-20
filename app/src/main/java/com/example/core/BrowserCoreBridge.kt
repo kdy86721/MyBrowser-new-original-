@@ -960,8 +960,11 @@ class LocalKotlinCore(
                 current.secondaryTabId?.takeIf { it != nextActiveId && current.tabs.any { t -> t.id == it } }
                     ?: current.previousActiveTabId?.takeIf { it != nextActiveId && current.tabs.any { t -> t.id == it } }
             }
+            val nextSecondary = nextPrevious
+                ?: current.tabs.firstOrNull { it.id != nextActiveId }?.id
             current.copy(
                 activeTabId = nextActiveId,
+                secondaryTabId = nextSecondary,
                 previousActiveTabId = nextPrevious,
                 preferences = current.preferences.copy(foldableDualPaneEnabled = false),
             )

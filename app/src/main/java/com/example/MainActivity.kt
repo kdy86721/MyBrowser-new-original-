@@ -65,11 +65,14 @@ import androidx.compose.foundation.layout.BoxScope
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.asPaddingValues
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.statusBars
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.AlertDialog
@@ -95,6 +98,7 @@ import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.TransformOrigin
 import androidx.compose.ui.graphics.graphicsLayer
@@ -104,6 +108,7 @@ import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.lifecycle.Lifecycle
@@ -907,6 +912,7 @@ private fun MyBrowserRootScreen(
     val webViewPool = remember { mutableMapOf<String, WebView>() }
     val tabLastUsedMs = remember { mutableMapOf<String, Long>() }
     val tabScrollPositions = remember { mutableMapOf<String, Pair<Int, Int>>() }
+    val tabScrollCallbacks = remember { mutableMapOf<String, (Int, Int, Boolean) -> Unit>() }
     val tabThumbnails = remember { mutableStateMapOf<String, Bitmap>() }
 
     fun captureTabThumbnail(tabId: String, wv: WebView?): Bitmap? {
@@ -1168,7 +1174,7 @@ private fun MyBrowserRootScreen(
     // Cleanly destroy closed tab WebViews & remove stale thumbnails/scroll state to eliminate CPU/memory leaks
     LaunchedEffect(snapshot.tabs) {
         val openIds = snapshot.tabs.map { it.id }.toSet()
-        val staleIds = (webViewPool.keys + tabThumbnails.keys + tabLastUsedMs.keys + tabScrollPositions.keys)
+        val staleIds = (webViewPool.keys + tabThumbnails.keys + tabLastUsedMs.keys + tabScrollPositions.keys + tabScrollCallbacks.keys)
             .distinct()
             .filter { it !in openIds }
         staleIds.forEach { staleId ->
@@ -1176,6 +1182,7 @@ private fun MyBrowserRootScreen(
             tabThumbnails.remove(staleId)
             tabLastUsedMs.remove(staleId)
             tabScrollPositions.remove(staleId)
+            tabScrollCallbacks.remove(staleId)
             webViewPool.remove(staleId)?.let { wv ->
                 destroyWebViewCleanly(wv)
             }
@@ -1195,6 +1202,7 @@ private fun MyBrowserRootScreen(
             tabThumbnails.clear()
             tabLastUsedMs.clear()
             tabScrollPositions.clear()
+            tabScrollCallbacks.clear()
             saveAllNonIncognitoWebViews()
             flushCookiesSafely()
             viewModel.persistConfigSync()
@@ -1245,14 +1253,31 @@ private fun MyBrowserRootScreen(
         )
 
         val isDualPaneActive = isUnfolded && prefs.foldableDualPaneEnabled
+        var mergeAnchorSide by remember { mutableIntStateOf(0) }
+        var mergingOutgoingTab by remember { mutableStateOf<BrowserTabState?>(null) }
+        var lastDualHingeGapDp by remember { mutableStateOf(12.dp) }
+        val splitExpandProgress by animateFloatAsState(
+            targetValue = if (isDualPaneActive) 1f else 0f,
+            animationSpec = spring(dampingRatio = 0.86f, stiffness = 360f),
+            label = "dual_pane_split_merge_progress",
+        )
+
         LaunchedEffect(isDualPaneActive) {
             if (isDualPaneActive) {
+                mergingOutgoingTab = null
+                rightPaneUi.resetScrollCollapse()
                 viewModel.ensureSecondaryTabForDualPane()
             } else {
                 focusedPaneIndex = 0
                 rightPaneUi.closeTransientPopups()
                 if (quickMenuPaneIndex == 1) quickMenuPaneIndex = null
                 if (gridTabSwitcherPaneIndex == 1) gridTabSwitcherPaneIndex = null
+            }
+        }
+        LaunchedEffect(isDualPaneActive, splitExpandProgress) {
+            if (!isDualPaneActive && splitExpandProgress <= 0.01f) {
+                mergingOutgoingTab = null
+                mergeAnchorSide = 0
             }
         }
 
@@ -1285,15 +1310,19 @@ private fun MyBrowserRootScreen(
         } else {
             0.dp
         }
+        if (isDualPaneActive) {
+            lastDualHingeGapDp = centerHingeGapDp
+        }
 
         // Pause hidden background tabs, resume visible pane tabs, and apply LRU eviction cap
-        LaunchedEffect(snapshot.activeTabId, secondaryTab?.id, isDualPaneActive) {
+        LaunchedEffect(snapshot.activeTabId, secondaryTab?.id, isDualPaneActive, mergingOutgoingTab?.id) {
             val now = System.currentTimeMillis()
             val visibleIds = buildSet {
                 add(snapshot.activeTabId)
                 if (isDualPaneActive && secondaryTab != null) {
                     add(secondaryTab.id)
                 }
+                mergingOutgoingTab?.id?.let { add(it) }
             }
             visibleIds.forEach { id -> tabLastUsedMs[id] = now }
             webViewPool.forEach { (id, wv) ->
@@ -1409,7 +1438,16 @@ private fun MyBrowserRootScreen(
                     false
                 } else {
                     focusedPaneIndex = targetPane
-                    val scrollCallback = if (targetPane == 1) onRightScrollDelta else onLeftScrollDelta
+                    val livePopupScrollCallback: (Int, Int, Boolean) -> Unit = { dy, sy, scrollable ->
+                        val registered = tabScrollCallbacks[newTab.id]
+                        if (registered != null) {
+                            registered(dy, sy, scrollable)
+                        } else if (targetPane == 1) {
+                            onRightScrollDelta(dy, sy, scrollable)
+                        } else {
+                            onLeftScrollDelta(dy, sy, scrollable)
+                        }
+                    }
                     val popupWebView = createConfiguredWebView(
                         context = context,
                         tabId = newTab.id,
@@ -1419,7 +1457,7 @@ private fun MyBrowserRootScreen(
                         preferences = nextSnap.preferences,
                         isDesktopMode = newTab.isDesktopMode,
                         viewModel = viewModel,
-                        onScrollDelta = scrollCallback,
+                        onScrollDelta = livePopupScrollCallback,
                         onOpenFileChooser = onOpenFileChooser,
                         onPermissionRequest = onWebPermissionRequest,
                         onGeolocationPrompt = onGeolocationPrompt,
@@ -1429,7 +1467,8 @@ private fun MyBrowserRootScreen(
                                 viewModel = viewModel,
                                 webViewPool = webViewPool,
                                 tabLastUsedMs = tabLastUsedMs,
-                                onScrollDelta = scrollCallback,
+                                tabScrollCallbacks = tabScrollCallbacks,
+                                fallbackScrollDelta = if (targetPane == 1) onRightScrollDelta else onLeftScrollDelta,
                                 onOpenFileChooser = onOpenFileChooser,
                                 onPermissionRequest = onWebPermissionRequest,
                                 onGeolocationPrompt = onGeolocationPrompt,
@@ -1739,19 +1778,50 @@ private fun MyBrowserRootScreen(
             }
         }
 
-        fun handleLongPressSwipeSplit(sourceTab: BrowserTabState?, placeSourceOnLeft: Boolean) {
-            if (!isUnfolded || !prefs.foldableLongPressSwipeSplitEnabled) return
+        fun triggerCloseSplitPane(keepLeftPane: Boolean) {
+            leftPaneUi.closeTransientPopups()
+            rightPaneUi.closeTransientPopups()
+            quickMenuPaneIndex = null
+            gridTabSwitcherPaneIndex = null
+            primaryTab?.let { captureTabThumbnail(it.id, webViewPool[it.id]) }
+            secondaryTab?.let { captureTabThumbnail(it.id, webViewPool[it.id]) }
+            mergeAnchorSide = if (keepLeftPane) 0 else 1
+            mergingOutgoingTab = if (keepLeftPane) secondaryTab else primaryTab
+            viewModel.closeSplitPane(keepLeftPane = keepLeftPane)
+            focusedPaneIndex = 0
+        }
+
+        fun handleLongPressSwipeSplit(
+            paneIndex: Int,
+            sourceTab: BrowserTabState?,
+            swipeLeft: Boolean,
+        ) {
+            if (!isUnfolded) return
+            if (isDualPaneActive) {
+                // Reverse swipe-to-merge:
+                // Left pane (0) + Swipe Right -> keep Left pane active, preserve Right tab in open tabs
+                // Right pane (1) + Swipe Left -> keep Right pane active, preserve Left tab in open tabs
+                when {
+                    paneIndex == 0 && !swipeLeft -> triggerCloseSplitPane(keepLeftPane = true)
+                    paneIndex == 1 && swipeLeft -> triggerCloseSplitPane(keepLeftPane = false)
+                }
+                return
+            }
+            if (!prefs.foldableLongPressSwipeSplitEnabled) return
             leftPaneUi.closeTransientPopups()
             rightPaneUi.closeTransientPopups()
             quickMenuPaneIndex = null
             gridTabSwitcherPaneIndex = null
             val sourceId = sourceTab?.id ?: snapshot.activeTabId
             captureTabThumbnail(sourceId, webViewPool[sourceId])
+            mergeAnchorSide = if (swipeLeft) 0 else 1
+            mergingOutgoingTab = null
             viewModel.splitTabForFoldable(
                 sourceTabId = sourceId,
-                placeSourceOnLeft = placeSourceOnLeft,
+                placeSourceOnLeft = swipeLeft,
             )
-            focusedPaneIndex = if (placeSourceOnLeft) 0 else 1
+            rightPaneUi.resetScrollCollapse()
+            focusedPaneIndex = if (swipeLeft) 0 else 1
         }
 
         @Composable
@@ -1796,16 +1866,12 @@ private fun MyBrowserRootScreen(
                     findQuery = paneUi.findQuery,
                     isCollapsedToPill = isCollapsed,
                     isSplitPaneBar = isSplitPaneBar,
+                    splitPaneSide = paneIndex,
                     paneTagPrefix = paneTagPrefix,
                     onCloseSplitPane = if (isSplitPaneBar) {
                         {
-                            leftPaneUi.closeTransientPopups()
-                            rightPaneUi.closeTransientPopups()
-                            quickMenuPaneIndex = null
-                            gridTabSwitcherPaneIndex = null
                             // Closing Left pane (0) keeps Right pane (keepLeftPane = false); closing Right pane (1) keeps Left pane (keepLeftPane = true)
-                            viewModel.closeSplitPane(keepLeftPane = paneIndex == 1)
-                            focusedPaneIndex = 0
+                            triggerCloseSplitPane(keepLeftPane = paneIndex == 1)
                         }
                     } else {
                         null
@@ -1939,8 +2005,8 @@ private fun MyBrowserRootScreen(
                         focusedPaneIndex = paneIndex
                         launchAiChatForTab(paneTab, paneWebView)
                     },
-                    onLongPressSwipeSplit = { placeCurrentOnLeft ->
-                        handleLongPressSwipeSplit(paneTab, placeCurrentOnLeft)
+                    onLongPressSwipeSplit = { swipeLeft ->
+                        handleLongPressSwipeSplit(paneIndex, paneTab, swipeLeft)
                     },
                     modifier = Modifier.align(Alignment.BottomCenter),
                 )
@@ -1962,157 +2028,218 @@ private fun MyBrowserRootScreen(
             label = "browser_push_parallax",
         )
 
+        val statusBarTopPadding = WindowInsets.statusBars.asPaddingValues().calculateTopPadding()
+        val viewportTopInset = statusBarTopPadding + prefs.topSafeAreaPaddingDp.dp
+
         // 1. Browser Viewport + Independent Per-Pane Floating Bars + Quick-Toggle Dropdown Layer
         Box(
             modifier = Modifier
                 .fillMaxSize()
+                .background(ObsidianVoid)
                 .graphicsLayer {
                     translationX = -size.width * 0.25f * parallaxProgressState.value
                 },
         ) {
-            if (isDualPaneActive && primaryTab != null && secondaryTab != null) {
-                Row(
-                    modifier = Modifier
-                        .fillMaxSize()
-                        .testTag("dual_pane_container"),
-                ) {
-                    // Left Split Pane (Independent WebView + Independent FloatingControlBar)
-                    Box(
-                        modifier = Modifier
-                            .weight(1f)
-                            .fillMaxHeight()
-                            .testTag("dual_pane_left_container"),
-                    ) {
-                        key(primaryTab.id) {
-                            WebViewPane(
-                                tab = primaryTab,
-                                preferences = prefs,
-                                webViewPool = webViewPool,
-                                tabLastUsedMs = tabLastUsedMs,
-                                consumeSavedScrollPosition = { id -> tabScrollPositions.remove(id) },
-                                viewModel = viewModel,
-                                isDualPane = true,
-                                isFocusedPane = focusedPaneIndex == 0,
-                                onPaneFocused = { focusedPaneIndex = 0 },
-                                onScrollDelta = onLeftScrollDelta,
-                                onOpenFileChooser = onOpenFileChooser,
-                                onPermissionRequest = onWebPermissionRequest,
-                                onGeolocationPrompt = onGeolocationPrompt,
-                                onCreateNewWindow = createOnNewWindowForPane(0),
-                                onCloseWindow = { wv -> closeWindowByWebView(wv, webViewPool, viewModel) },
-                                onShowCustomView = onShowFullscreenVideo,
-                                onHideCustomView = onHideFullscreenVideo,
-                                onSslError = onSslErrorReceived,
-                                onCaptureThumbnail = { id, wv -> captureTabThumbnail(id, wv) },
-                                modifier = Modifier
-                                    .fillMaxSize()
-                                    .testTag("dual_pane_left_webview"),
-                            )
-                        }
-
-                        PaneFloatingBarOverlay(
-                            paneIndex = 0,
-                            paneTab = primaryTab,
-                            paneSnapshot = leftDisplaySnapshot,
-                            paneUi = leftPaneUi,
-                            isCollapsed = isLeftBarCollapsed,
-                            isSplitPaneBar = true,
-                            paneTagPrefix = "left_",
-                        )
-                    }
-
-                    // Center Hinge / Gap Divider (respects foldableHingeAvoidanceDp across both WebViews & Bars)
-                    Box(
-                        modifier = Modifier
-                            .width(centerHingeGapDp)
-                            .fillMaxHeight()
-                            .background(Color(0xFF050810))
-                            .testTag("dual_pane_hinge_divider"),
-                    )
-
-                    // Right Split Pane (Independent WebView + Independent FloatingControlBar)
-                    Box(
-                        modifier = Modifier
-                            .weight(1f)
-                            .fillMaxHeight()
-                            .testTag("dual_pane_right_container"),
-                    ) {
-                        key(secondaryTab.id) {
-                            WebViewPane(
-                                tab = secondaryTab,
-                                preferences = prefs,
-                                webViewPool = webViewPool,
-                                tabLastUsedMs = tabLastUsedMs,
-                                consumeSavedScrollPosition = { id -> tabScrollPositions.remove(id) },
-                                viewModel = viewModel,
-                                isDualPane = true,
-                                isFocusedPane = focusedPaneIndex == 1,
-                                onPaneFocused = { focusedPaneIndex = 1 },
-                                onScrollDelta = onRightScrollDelta,
-                                onOpenFileChooser = onOpenFileChooser,
-                                onPermissionRequest = onWebPermissionRequest,
-                                onGeolocationPrompt = onGeolocationPrompt,
-                                onCreateNewWindow = createOnNewWindowForPane(1),
-                                onCloseWindow = { wv -> closeWindowByWebView(wv, webViewPool, viewModel) },
-                                onShowCustomView = onShowFullscreenVideo,
-                                onHideCustomView = onHideFullscreenVideo,
-                                onSslError = onSslErrorReceived,
-                                onCaptureThumbnail = { id, wv -> captureTabThumbnail(id, wv) },
-                                modifier = Modifier
-                                    .fillMaxSize()
-                                    .testTag("dual_pane_right_webview"),
-                            )
-                        }
-
-                        PaneFloatingBarOverlay(
-                            paneIndex = 1,
-                            paneTab = secondaryTab,
-                            paneSnapshot = rightDisplaySnapshot,
-                            paneUi = rightPaneUi,
-                            isCollapsed = isRightBarCollapsed,
-                            isSplitPaneBar = true,
-                            paneTagPrefix = "right_",
-                        )
-                    }
+            BoxWithConstraints(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(top = viewportTopInset)
+                    .testTag("browser_viewport_container"),
+            ) {
+                val viewportWidth = maxWidth
+                val activeOutgoingTab = if (!isDualPaneActive) {
+                    mergingOutgoingTab?.takeIf { out -> out.id != primaryTab?.id }
+                } else {
+                    null
                 }
-            } else if (primaryTab != null) {
-                Box(modifier = Modifier.fillMaxSize()) {
-                    key(primaryTab.id) {
-                        WebViewPane(
-                            tab = primaryTab,
-                            preferences = prefs,
-                            webViewPool = webViewPool,
-                            tabLastUsedMs = tabLastUsedMs,
-                            consumeSavedScrollPosition = { id -> tabScrollPositions.remove(id) },
-                            viewModel = viewModel,
-                            isDualPane = false,
-                            isFocusedPane = true,
-                            onPaneFocused = { focusedPaneIndex = 0 },
-                            onScrollDelta = onLeftScrollDelta,
-                            onOpenFileChooser = onOpenFileChooser,
-                            onPermissionRequest = onWebPermissionRequest,
-                            onGeolocationPrompt = onGeolocationPrompt,
-                            onCreateNewWindow = createOnNewWindowForPane(0),
-                            onCloseWindow = { wv -> closeWindowByWebView(wv, webViewPool, viewModel) },
-                            onShowCustomView = onShowFullscreenVideo,
-                            onHideCustomView = onHideFullscreenVideo,
-                            onSslError = onSslErrorReceived,
-                            onCaptureThumbnail = { id, wv -> captureTabThumbnail(id, wv) },
-                            modifier = Modifier
-                                .fillMaxSize()
-                                .testTag("fullscreen_webview"),
-                        )
+                val showSplitLayout = (isDualPaneActive && primaryTab != null && secondaryTab != null) ||
+                    (activeOutgoingTab != null && primaryTab != null && splitExpandProgress > 0.01f)
+
+                if (primaryTab != null) {
+                    val effectiveSplitProgress = if (showSplitLayout) splitExpandProgress.coerceIn(0f, 1f) else 0f
+                    val effectiveGapDp = if (showSplitLayout) {
+                        (if (isDualPaneActive) centerHingeGapDp else lastDualHingeGapDp) * effectiveSplitProgress
+                    } else {
+                        0.dp
+                    }
+                    val halfWidth = ((viewportWidth - effectiveGapDp) / 2f).coerceAtLeast(0.dp)
+                    val shrinkingWidth = (halfWidth * effectiveSplitProgress).coerceAtLeast(0.dp)
+                    val expandingWidth = (viewportWidth - effectiveGapDp - shrinkingWidth).coerceAtLeast(0.dp)
+
+                    val leftSlotTab: BrowserTabState?
+                    val rightSlotTab: BrowserTabState?
+                    val leftWidth: Dp
+                    val rightWidth: Dp
+                    val leftIsOutgoing: Boolean
+                    val rightIsOutgoing: Boolean
+
+                    if (!showSplitLayout) {
+                        leftSlotTab = primaryTab
+                        rightSlotTab = null
+                        leftWidth = viewportWidth
+                        rightWidth = 0.dp
+                        leftIsOutgoing = false
+                        rightIsOutgoing = false
+                    } else if (isDualPaneActive) {
+                        leftSlotTab = primaryTab
+                        rightSlotTab = secondaryTab
+                        leftWidth = if (mergeAnchorSide == 0) expandingWidth else shrinkingWidth
+                        rightWidth = if (mergeAnchorSide == 0) shrinkingWidth else expandingWidth
+                        leftIsOutgoing = false
+                        rightIsOutgoing = false
+                    } else if (mergeAnchorSide == 0) {
+                        leftSlotTab = primaryTab
+                        rightSlotTab = activeOutgoingTab
+                        leftWidth = expandingWidth
+                        rightWidth = shrinkingWidth
+                        leftIsOutgoing = false
+                        rightIsOutgoing = true
+                    } else {
+                        leftSlotTab = activeOutgoingTab
+                        rightSlotTab = primaryTab
+                        leftWidth = shrinkingWidth
+                        rightWidth = expandingWidth
+                        leftIsOutgoing = true
+                        rightIsOutgoing = false
                     }
 
-                    PaneFloatingBarOverlay(
-                        paneIndex = 0,
-                        paneTab = primaryTab,
-                        paneSnapshot = leftDisplaySnapshot,
-                        paneUi = leftPaneUi,
-                        isCollapsed = isLeftBarCollapsed,
-                        isSplitPaneBar = false,
-                        paneTagPrefix = "",
-                    )
+                    Row(
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .testTag(if (isDualPaneActive) "dual_pane_container" else "single_pane_viewport"),
+                    ) {
+                        if (leftSlotTab != null && leftWidth > 0.dp) {
+                            key(leftSlotTab.id) {
+                                Box(
+                                    modifier = Modifier
+                                        .width(leftWidth)
+                                        .fillMaxHeight()
+                                        .clipToBounds()
+                                        .graphicsLayer {
+                                            alpha = if (leftIsOutgoing) effectiveSplitProgress else 1f
+                                        }
+                                        .testTag(
+                                            if (isDualPaneActive) "dual_pane_left_container"
+                                            else "single_pane_container"
+                                        ),
+                                ) {
+                                    WebViewPane(
+                                        tab = leftSlotTab,
+                                        preferences = prefs,
+                                        webViewPool = webViewPool,
+                                        tabLastUsedMs = tabLastUsedMs,
+                                        tabScrollCallbacks = tabScrollCallbacks,
+                                        consumeSavedScrollPosition = { id -> tabScrollPositions.remove(id) },
+                                        viewModel = viewModel,
+                                        isDualPane = isDualPaneActive,
+                                        isFocusedPane = if (isDualPaneActive) focusedPaneIndex == 0 else true,
+                                        onPaneFocused = { focusedPaneIndex = 0 },
+                                        onScrollDelta = onLeftScrollDelta,
+                                        onOpenFileChooser = onOpenFileChooser,
+                                        onPermissionRequest = onWebPermissionRequest,
+                                        onGeolocationPrompt = onGeolocationPrompt,
+                                        onCreateNewWindow = createOnNewWindowForPane(0),
+                                        onCloseWindow = { wv -> closeWindowByWebView(wv, webViewPool, viewModel) },
+                                        onShowCustomView = onShowFullscreenVideo,
+                                        onHideCustomView = onHideFullscreenVideo,
+                                        onSslError = onSslErrorReceived,
+                                        onCaptureThumbnail = { id, wv -> captureTabThumbnail(id, wv) },
+                                        modifier = Modifier
+                                            .fillMaxSize()
+                                            .testTag(
+                                                if (isDualPaneActive) "dual_pane_left_webview"
+                                                else "fullscreen_webview"
+                                            ),
+                                    )
+
+                                    if (!leftIsOutgoing) {
+                                        PaneFloatingBarOverlay(
+                                            paneIndex = 0,
+                                            paneTab = leftSlotTab,
+                                            paneSnapshot = leftDisplaySnapshot,
+                                            paneUi = leftPaneUi,
+                                            isCollapsed = isLeftBarCollapsed,
+                                            isSplitPaneBar = isDualPaneActive,
+                                            paneTagPrefix = if (isDualPaneActive) "left_" else "",
+                                        )
+                                    }
+                                }
+                            }
+                        }
+
+                        if (showSplitLayout && effectiveGapDp > 0.dp) {
+                            key("dual_pane_hinge_divider") {
+                                Box(
+                                    modifier = Modifier
+                                        .width(effectiveGapDp)
+                                        .fillMaxHeight()
+                                        .background(Color(0xFF050810))
+                                        .graphicsLayer { alpha = effectiveSplitProgress }
+                                        .testTag("dual_pane_hinge_divider"),
+                                )
+                            }
+                        }
+
+                        if (rightSlotTab != null && rightWidth > 0.dp) {
+                            key(rightSlotTab.id) {
+                                val isRightKeptSingle = !isDualPaneActive && !rightIsOutgoing
+                                Box(
+                                    modifier = Modifier
+                                        .width(rightWidth)
+                                        .fillMaxHeight()
+                                        .clipToBounds()
+                                        .graphicsLayer {
+                                            alpha = if (rightIsOutgoing) effectiveSplitProgress else 1f
+                                        }
+                                        .testTag(
+                                            if (isDualPaneActive) "dual_pane_right_container"
+                                            else "merging_right_container"
+                                        ),
+                                ) {
+                                    WebViewPane(
+                                        tab = rightSlotTab,
+                                        preferences = prefs,
+                                        webViewPool = webViewPool,
+                                        tabLastUsedMs = tabLastUsedMs,
+                                        tabScrollCallbacks = tabScrollCallbacks,
+                                        consumeSavedScrollPosition = { id -> tabScrollPositions.remove(id) },
+                                        viewModel = viewModel,
+                                        isDualPane = isDualPaneActive,
+                                        isFocusedPane = if (isDualPaneActive) focusedPaneIndex == 1 else true,
+                                        onPaneFocused = { focusedPaneIndex = if (isDualPaneActive) 1 else 0 },
+                                        onScrollDelta = if (isRightKeptSingle) onLeftScrollDelta else onRightScrollDelta,
+                                        onOpenFileChooser = onOpenFileChooser,
+                                        onPermissionRequest = onWebPermissionRequest,
+                                        onGeolocationPrompt = onGeolocationPrompt,
+                                        onCreateNewWindow = createOnNewWindowForPane(if (isRightKeptSingle) 0 else 1),
+                                        onCloseWindow = { wv -> closeWindowByWebView(wv, webViewPool, viewModel) },
+                                        onShowCustomView = onShowFullscreenVideo,
+                                        onHideCustomView = onHideFullscreenVideo,
+                                        onSslError = onSslErrorReceived,
+                                        onCaptureThumbnail = { id, wv -> captureTabThumbnail(id, wv) },
+                                        modifier = Modifier
+                                            .fillMaxSize()
+                                            .testTag(
+                                                if (isDualPaneActive) "dual_pane_right_webview"
+                                                else "fullscreen_webview"
+                                            ),
+                                    )
+
+                                    if (!rightIsOutgoing) {
+                                        PaneFloatingBarOverlay(
+                                            paneIndex = if (isRightKeptSingle) 0 else 1,
+                                            paneTab = rightSlotTab,
+                                            paneSnapshot = if (isRightKeptSingle) leftDisplaySnapshot else rightDisplaySnapshot,
+                                            paneUi = if (isRightKeptSingle) leftPaneUi else rightPaneUi,
+                                            isCollapsed = if (isRightKeptSingle) isLeftBarCollapsed else isRightBarCollapsed,
+                                            isSplitPaneBar = isDualPaneActive,
+                                            paneTagPrefix = if (isDualPaneActive) "right_" else "",
+                                        )
+                                    }
+                                }
+                            }
+                        }
+                    }
                 }
             }
 
@@ -2180,8 +2307,7 @@ private fun MyBrowserRootScreen(
                             QuickToggleAction.DUAL_PANE -> {
                                 val nextDual = !prefs.foldableDualPaneEnabled
                                 if (!nextDual && isDualPaneActive) {
-                                    quickMenuPaneIndex = null
-                                    viewModel.closeSplitPane(keepLeftPane = activeQuickMenuPane == 0)
+                                    triggerCloseSplitPane(keepLeftPane = activeQuickMenuPane == 0)
                                 } else {
                                     viewModel.updateFoldableSettings(dualPaneEnabled = nextDual)
                                     if (nextDual && !isUnfolded) {
@@ -2759,6 +2885,7 @@ private fun WebViewPane(
     preferences: BrowserPreferences,
     webViewPool: MutableMap<String, WebView>,
     tabLastUsedMs: MutableMap<String, Long>,
+    tabScrollCallbacks: MutableMap<String, (Int, Int, Boolean) -> Unit>,
     consumeSavedScrollPosition: (String) -> Pair<Int, Int>?,
     viewModel: BrowserViewModel,
     isDualPane: Boolean,
@@ -2788,11 +2915,26 @@ private fun WebViewPane(
     val latestOnSslError by rememberUpdatedState(onSslError)
     val latestOnCaptureThumbnail by rememberUpdatedState(onCaptureThumbnail)
 
+    var attachedContainer by remember { mutableStateOf<FrameLayout?>(null) }
+    val paneScrollCallback = remember(tab.id) {
+        { dy: Int, scrollY: Int, isScrollable: Boolean ->
+            latestOnScrollDelta(dy, scrollY, isScrollable)
+        }
+    }
+
     DisposableEffect(tab.id) {
+        tabScrollCallbacks[tab.id] = paneScrollCallback
         onDispose {
+            if (tabScrollCallbacks[tab.id] === paneScrollCallback) {
+                tabScrollCallbacks.remove(tab.id)
+            }
+            val host = attachedContainer
             webViewPool[tab.id]?.let { wv ->
-                wv.setOnTouchListener(null)
-                (wv.parent as? ViewGroup)?.removeView(wv)
+                if (host != null && wv.parent === host) {
+                    wv.setOnTouchListener(null)
+                    wv.setOnScrollChangeListener(null)
+                    host.removeView(wv)
+                }
             }
         }
     }
@@ -2814,9 +2956,11 @@ private fun WebViewPane(
                         ViewGroup.LayoutParams.MATCH_PARENT,
                         ViewGroup.LayoutParams.MATCH_PARENT,
                     )
-                }
+                }.also { attachedContainer = it }
             },
             update = { container ->
+                attachedContainer = container
+                tabScrollCallbacks[tab.id] = paneScrollCallback
                 val targetWebView = webViewPool.getOrPut(tab.id) {
                     tabLastUsedMs[tab.id] = System.currentTimeMillis()
                     createConfiguredWebView(
@@ -2829,7 +2973,7 @@ private fun WebViewPane(
                         isDesktopMode = tab.isDesktopMode,
                         viewModel = viewModel,
                         onScrollDelta = { dy, sy, scrollable ->
-                            latestOnScrollDelta(dy, sy, scrollable)
+                            tabScrollCallbacks[tab.id]?.invoke(dy, sy, scrollable)
                         },
                         onOpenFileChooser = { cb, params ->
                             latestOnOpenFileChooser(cb, params)
@@ -2859,6 +3003,14 @@ private fun WebViewPane(
                             latestOnCaptureThumbnail(tab.id, wv)
                         },
                     )
+                }
+
+                // Always re-bind independent scroll & touch listeners to this pane's live callbacks
+                // so pooled WebViews moved between Single, Left, and Right panes never keep stale hooks.
+                targetWebView.setOnScrollChangeListener { v, _, scrollY, _, oldScrollY ->
+                    val dy = scrollY - oldScrollY
+                    val isScrollable = v.canScrollVertically(1) || v.canScrollVertically(-1)
+                    paneScrollCallback(dy, scrollY, isScrollable)
                 }
 
                 targetWebView.setOnTouchListener { _, event ->
@@ -2892,6 +3044,7 @@ private fun WebViewPane(
                     val child = container.getChildAt(i)
                     if (child is WebView) {
                         child.setOnTouchListener(null)
+                        child.setOnScrollChangeListener(null)
                     }
                 }
                 container.removeAllViews()
@@ -2906,7 +3059,8 @@ private fun createPopupHelper(
     viewModel: BrowserViewModel,
     webViewPool: MutableMap<String, WebView>,
     tabLastUsedMs: MutableMap<String, Long>,
-    onScrollDelta: (Int, Int, Boolean) -> Unit,
+    tabScrollCallbacks: MutableMap<String, (Int, Int, Boolean) -> Unit>,
+    fallbackScrollDelta: (Int, Int, Boolean) -> Unit,
     onOpenFileChooser: (ValueCallback<Array<Uri>>?, WebChromeClient.FileChooserParams?) -> Unit,
     onPermissionRequest: (PermissionRequest) -> Unit,
     onGeolocationPrompt: (String, GeolocationPermissions.Callback) -> Unit,
@@ -2930,7 +3084,14 @@ private fun createPopupHelper(
         preferences = nextSnap.preferences,
         isDesktopMode = newTab.isDesktopMode,
         viewModel = viewModel,
-        onScrollDelta = onScrollDelta,
+        onScrollDelta = { dy, sy, scrollable ->
+            val registered = tabScrollCallbacks[newTab.id]
+            if (registered != null) {
+                registered(dy, sy, scrollable)
+            } else {
+                fallbackScrollDelta(dy, sy, scrollable)
+            }
+        },
         onOpenFileChooser = onOpenFileChooser,
         onPermissionRequest = onPermissionRequest,
         onGeolocationPrompt = onGeolocationPrompt,
@@ -2940,7 +3101,8 @@ private fun createPopupHelper(
                 viewModel = viewModel,
                 webViewPool = webViewPool,
                 tabLastUsedMs = tabLastUsedMs,
-                onScrollDelta = onScrollDelta,
+                tabScrollCallbacks = tabScrollCallbacks,
+                fallbackScrollDelta = fallbackScrollDelta,
                 onOpenFileChooser = onOpenFileChooser,
                 onPermissionRequest = onPermissionRequest,
                 onGeolocationPrompt = onGeolocationPrompt,
