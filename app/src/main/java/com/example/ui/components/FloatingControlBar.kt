@@ -11,11 +11,10 @@ import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.animateContentSize
 import androidx.compose.animation.core.Animatable
-import androidx.compose.animation.core.FastOutSlowInEasing
+import androidx.compose.animation.core.Spring
 import androidx.compose.animation.core.animateDpAsState
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.spring
-import androidx.compose.animation.core.tween
 import androidx.compose.animation.expandHorizontally
 import androidx.compose.animation.expandVertically
 import androidx.compose.animation.fadeIn
@@ -49,7 +48,6 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.navigationBarsPadding
-import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -127,6 +125,7 @@ import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.input.pointer.PointerEventPass
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.input.pointer.positionChange
+import androidx.compose.ui.input.pointer.util.VelocityTracker
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalFocusManager
@@ -306,8 +305,16 @@ fun FloatingControlBar(
         // Optional Find-in-Page frosted capsule above the floating bar
         AnimatedVisibility(
             visible = isFindInPageOpen && !isEditingAddress,
-            enter = fadeIn(tween(180)) + scaleIn(initialScale = 0.94f),
-            exit = fadeOut(tween(140)) + scaleOut(targetScale = 0.94f),
+            enter = fadeIn(spring(dampingRatio = 0.88f, stiffness = Spring.StiffnessMediumLow)) +
+                scaleIn(
+                    initialScale = 0.94f,
+                    animationSpec = spring(dampingRatio = 0.82f, stiffness = Spring.StiffnessMediumLow),
+                ),
+            exit = fadeOut(spring(dampingRatio = 0.88f, stiffness = Spring.StiffnessMediumLow)) +
+                scaleOut(
+                    targetScale = 0.94f,
+                    animationSpec = spring(dampingRatio = 0.86f, stiffness = Spring.StiffnessMediumLow),
+                ),
         ) {
             FindInPageBar(
                 query = findQuery,
@@ -320,11 +327,25 @@ fun FloatingControlBar(
             )
         }
 
-        // Icon-only floating tab dock revealed with clean vertical fade/scale & synchronized unifiedRadius
+        // Icon-only floating tab dock revealed with spring physics & synchronized unifiedRadius
         AnimatedVisibility(
             visible = isTabDrawerOpen && !isEditingAddress,
-            enter = fadeIn(tween(200)) + scaleIn(initialScale = 0.94f) + slideInVertically(tween(220)) { it / 4 },
-            exit = fadeOut(tween(150)) + scaleOut(targetScale = 0.94f) + slideOutVertically(tween(160)) { it / 4 },
+            enter = fadeIn(spring(dampingRatio = 0.88f, stiffness = Spring.StiffnessMediumLow)) +
+                scaleIn(
+                    initialScale = 0.94f,
+                    animationSpec = spring(dampingRatio = 0.82f, stiffness = Spring.StiffnessMediumLow),
+                ) +
+                slideInVertically(
+                    animationSpec = spring(dampingRatio = 0.82f, stiffness = Spring.StiffnessMediumLow),
+                ) { it / 4 },
+            exit = fadeOut(spring(dampingRatio = 0.88f, stiffness = Spring.StiffnessMediumLow)) +
+                scaleOut(
+                    targetScale = 0.94f,
+                    animationSpec = spring(dampingRatio = 0.86f, stiffness = Spring.StiffnessMediumLow),
+                ) +
+                slideOutVertically(
+                    animationSpec = spring(dampingRatio = 0.86f, stiffness = Spring.StiffnessMediumLow),
+                ) { it / 4 },
         ) {
             IconOnlyTabDock(
                 tabs = snapshot.tabs,
@@ -358,14 +379,14 @@ fun FloatingControlBar(
 
             val animatedBarWidth by animateDpAsState(
                 targetValue = targetBarWidth,
-                animationSpec = spring(dampingRatio = 0.84f, stiffness = 360f),
+                animationSpec = spring(dampingRatio = 0.82f, stiffness = Spring.StiffnessMediumLow),
                 label = "floating_bar_width_morph",
             )
 
             val targetBarHeight = if (isExpandedAddressEdit) 96.dp else prefs.barHeightDp.dp
             val barHeight by animateDpAsState(
                 targetValue = targetBarHeight,
-                animationSpec = spring(dampingRatio = 0.85f, stiffness = 380f),
+                animationSpec = spring(dampingRatio = 0.82f, stiffness = Spring.StiffnessMediumLow),
                 label = "floating_bar_height",
             )
 
@@ -375,7 +396,7 @@ fun FloatingControlBar(
             }
             val animatedBias by animateFloatAsState(
                 targetValue = targetBias,
-                animationSpec = spring(stiffness = 380f),
+                animationSpec = spring(dampingRatio = 0.82f, stiffness = Spring.StiffnessMediumLow),
                 label = "floating_bar_horizontal_bias",
             )
 
@@ -408,8 +429,10 @@ fun FloatingControlBar(
                         // 1. Left Customizable Toolbar (icon-only)
                         AnimatedVisibility(
                             visible = !isEditingAddress && !effectiveCollapsed && effectiveLeftActions.isNotEmpty(),
-                            enter = fadeIn(tween(180)) + expandHorizontally(spring(stiffness = 380f)),
-                            exit = fadeOut(tween(140)) + shrinkHorizontally(spring(stiffness = 380f)),
+                            enter = fadeIn(spring(dampingRatio = 0.88f, stiffness = Spring.StiffnessMediumLow)) +
+                                expandHorizontally(spring(dampingRatio = 0.82f, stiffness = Spring.StiffnessMediumLow)),
+                            exit = fadeOut(spring(dampingRatio = 0.88f, stiffness = Spring.StiffnessMediumLow)) +
+                                shrinkHorizontally(spring(dampingRatio = 0.84f, stiffness = Spring.StiffnessMediumLow)),
                         ) {
                             Row(
                                 verticalAlignment = Alignment.CenterVertically,
@@ -436,7 +459,7 @@ fun FloatingControlBar(
                         }
                         val capsuleHeight by animateDpAsState(
                             targetValue = targetCapsuleHeight,
-                            animationSpec = spring(dampingRatio = 0.85f, stiffness = 380f),
+                            animationSpec = spring(dampingRatio = 0.82f, stiffness = Spring.StiffnessMediumLow),
                             label = "address_capsule_height",
                         )
                         AddressCapsule(
@@ -482,8 +505,10 @@ fun FloatingControlBar(
                         // 3. Right Customizable Toolbar (icon-only)
                         AnimatedVisibility(
                             visible = !isEditingAddress && !effectiveCollapsed && effectiveRightActions.isNotEmpty(),
-                            enter = fadeIn(tween(180)) + expandHorizontally(spring(stiffness = 380f)),
-                            exit = fadeOut(tween(140)) + shrinkHorizontally(spring(stiffness = 380f)),
+                            enter = fadeIn(spring(dampingRatio = 0.88f, stiffness = Spring.StiffnessMediumLow)) +
+                                expandHorizontally(spring(dampingRatio = 0.82f, stiffness = Spring.StiffnessMediumLow)),
+                            exit = fadeOut(spring(dampingRatio = 0.88f, stiffness = Spring.StiffnessMediumLow)) +
+                                shrinkHorizontally(spring(dampingRatio = 0.84f, stiffness = Spring.StiffnessMediumLow)),
                         ) {
                             Row(
                                 verticalAlignment = Alignment.CenterVertically,
@@ -505,8 +530,10 @@ fun FloatingControlBar(
                         // 3.5 Close / Merge Split Pane Button (visible only inside Dual-Pane Split View bars)
                         AnimatedVisibility(
                             visible = isSplitPaneBar && onCloseSplitPane != null && !isEditingAddress && !effectiveCollapsed,
-                            enter = fadeIn(tween(180)) + expandHorizontally(spring(stiffness = 380f)),
-                            exit = fadeOut(tween(140)) + shrinkHorizontally(spring(stiffness = 380f)),
+                            enter = fadeIn(spring(dampingRatio = 0.88f, stiffness = Spring.StiffnessMediumLow)) +
+                                expandHorizontally(spring(dampingRatio = 0.82f, stiffness = Spring.StiffnessMediumLow)),
+                            exit = fadeOut(spring(dampingRatio = 0.88f, stiffness = Spring.StiffnessMediumLow)) +
+                                shrinkHorizontally(spring(dampingRatio = 0.84f, stiffness = Spring.StiffnessMediumLow)),
                         ) {
                             GlassIconButton(
                                 icon = Icons.Rounded.CloseFullscreen,
@@ -522,8 +549,10 @@ fun FloatingControlBar(
                         // 4. Far-Right Fixed Gear Button (toggles Quick-Toggle dropdown menu)
                         AnimatedVisibility(
                             visible = !isEditingAddress && !effectiveCollapsed,
-                            enter = fadeIn(tween(180)) + expandHorizontally(spring(stiffness = 380f)),
-                            exit = fadeOut(tween(140)) + shrinkHorizontally(spring(stiffness = 380f)),
+                            enter = fadeIn(spring(dampingRatio = 0.88f, stiffness = Spring.StiffnessMediumLow)) +
+                                expandHorizontally(spring(dampingRatio = 0.82f, stiffness = Spring.StiffnessMediumLow)),
+                            exit = fadeOut(spring(dampingRatio = 0.88f, stiffness = Spring.StiffnessMediumLow)) +
+                                shrinkHorizontally(spring(dampingRatio = 0.84f, stiffness = Spring.StiffnessMediumLow)),
                         ) {
                             GlassIconButton(
                                 icon = Icons.Rounded.Settings,
@@ -567,7 +596,10 @@ private fun BarLoadingProgressOverlay(
     )
     val ringAlphaState = animateFloatAsState(
         targetValue = if (isLoading) 1f else 0f,
-        animationSpec = tween(durationMillis = if (isLoading) 120 else 340),
+        animationSpec = spring(
+            dampingRatio = 0.92f,
+            stiffness = if (isLoading) Spring.StiffnessMedium else Spring.StiffnessMediumLow,
+        ),
         label = "perimeter_ring_alpha",
     )
 
@@ -653,8 +685,8 @@ fun QuickToggleDropdownMenu(
         // Tap-consuming scrim backdrop animated independently so the menu AnimatedVisibility plays on open
         AnimatedVisibility(
             visible = visible,
-            enter = fadeIn(animationSpec = tween(durationMillis = 180)),
-            exit = fadeOut(animationSpec = tween(durationMillis = 150)),
+            enter = fadeIn(animationSpec = spring(dampingRatio = 0.88f, stiffness = Spring.StiffnessMediumLow)),
+            exit = fadeOut(animationSpec = spring(dampingRatio = 0.88f, stiffness = Spring.StiffnessMediumLow)),
         ) {
             BackHandler(enabled = visible) {
                 onDismiss()
@@ -670,7 +702,7 @@ fun QuickToggleDropdownMenu(
             )
         }
 
-        // Outer Liquid Glass container expanding upward from the bottom gear anchor in lockstep with items
+        // Outer Liquid Glass container expanding upward from the bottom gear anchor with damped spring physics
         Box(
             modifier = Modifier
                 .align(Alignment.BottomStart)
@@ -682,12 +714,42 @@ fun QuickToggleDropdownMenu(
                 visible = visible,
                 enter = expandVertically(
                     expandFrom = Alignment.Bottom,
-                    animationSpec = tween(durationMillis = 240, easing = FastOutSlowInEasing),
-                ) + fadeIn(animationSpec = tween(durationMillis = 180)),
+                    animationSpec = spring(
+                        dampingRatio = 0.84f,
+                        stiffness = Spring.StiffnessMediumLow,
+                    ),
+                ) + scaleIn(
+                    initialScale = 0.94f,
+                    transformOrigin = TransformOrigin(0.92f, 1f),
+                    animationSpec = spring(
+                        dampingRatio = 0.84f,
+                        stiffness = Spring.StiffnessMediumLow,
+                    ),
+                ) + fadeIn(
+                    animationSpec = spring(
+                        dampingRatio = 0.88f,
+                        stiffness = Spring.StiffnessMediumLow,
+                    ),
+                ),
                 exit = shrinkVertically(
                     shrinkTowards = Alignment.Bottom,
-                    animationSpec = tween(durationMillis = 200, easing = FastOutSlowInEasing),
-                ) + fadeOut(animationSpec = tween(durationMillis = 150)),
+                    animationSpec = spring(
+                        dampingRatio = 0.88f,
+                        stiffness = Spring.StiffnessMediumLow,
+                    ),
+                ) + scaleOut(
+                    targetScale = 0.94f,
+                    transformOrigin = TransformOrigin(0.92f, 1f),
+                    animationSpec = spring(
+                        dampingRatio = 0.88f,
+                        stiffness = Spring.StiffnessMediumLow,
+                    ),
+                ) + fadeOut(
+                    animationSpec = spring(
+                        dampingRatio = 0.88f,
+                        stiffness = Spring.StiffnessMediumLow,
+                    ),
+                ),
             ) {
                 LiquidGlassSurface(
                     modifier = Modifier
@@ -701,7 +763,10 @@ fun QuickToggleDropdownMenu(
                         )
                         .clip(menuShape)
                         .animateContentSize(
-                            animationSpec = tween(durationMillis = 220, easing = FastOutSlowInEasing),
+                            animationSpec = spring(
+                                dampingRatio = 0.84f,
+                                stiffness = Spring.StiffnessMediumLow,
+                            ),
                         )
                         .pointerInput(Unit) {
                             detectTapGestures { /* consume taps inside menu */ }
@@ -868,13 +933,19 @@ private fun StaggeredEntranceItem(
                 launch {
                     alphaAnim.animateTo(
                         targetValue = 1f,
-                        animationSpec = tween(durationMillis = 190, easing = FastOutSlowInEasing),
+                        animationSpec = spring(
+                            dampingRatio = 0.88f,
+                            stiffness = Spring.StiffnessMediumLow,
+                        ),
                     )
                 }
                 launch {
                     translationYDp.animateTo(
                         targetValue = 0f,
-                        animationSpec = spring(dampingRatio = 0.82f, stiffness = 460f),
+                        animationSpec = spring(
+                            dampingRatio = 0.80f,
+                            stiffness = Spring.StiffnessMediumLow,
+                        ),
                     )
                 }
             }
@@ -1038,12 +1109,12 @@ private fun QuickToggleStateIndicator(
             val thumbSize = if (compact) 13.dp else 15.dp
             val trackColor by animateColorAsState(
                 targetValue = if (isActive) IceCyan else Color.White.copy(alpha = 0.16f),
-                animationSpec = tween(180),
+                animationSpec = spring(dampingRatio = 0.86f, stiffness = Spring.StiffnessMediumLow),
                 label = "toggle_switch_track",
             )
-            val thumbOffset by animateDpAsState(
+            val thumbOffsetState = animateDpAsState(
                 targetValue = if (isActive) (trackWidth - thumbSize - 2.dp) else 2.dp,
-                animationSpec = spring(dampingRatio = 0.8f, stiffness = 460f),
+                animationSpec = spring(dampingRatio = 0.82f, stiffness = Spring.StiffnessMediumLow),
                 label = "toggle_switch_thumb",
             )
 
@@ -1057,7 +1128,9 @@ private fun QuickToggleStateIndicator(
             ) {
                 Box(
                     modifier = Modifier
-                        .offset(x = thumbOffset)
+                        .graphicsLayer {
+                            translationX = thumbOffsetState.value.toPx()
+                        }
                         .size(thumbSize)
                         .clip(CircleShape)
                         .background(if (isActive) ObsidianVoid else PureFrost)
@@ -1068,7 +1141,7 @@ private fun QuickToggleStateIndicator(
         ToggleIndicatorStyle.PILL -> {
             val bgColor by animateColorAsState(
                 targetValue = if (isActive) IceCyan.copy(alpha = 0.28f) else Color.White.copy(alpha = 0.08f),
-                animationSpec = tween(180),
+                animationSpec = spring(dampingRatio = 0.86f, stiffness = Spring.StiffnessMediumLow),
                 label = "toggle_pill_bg",
             )
             Box(
@@ -1098,7 +1171,7 @@ private fun QuickToggleStateIndicator(
         ToggleIndicatorStyle.DOT -> {
             val dotColor by animateColorAsState(
                 targetValue = if (isActive) IceCyan else Color.White.copy(alpha = 0.20f),
-                animationSpec = tween(180),
+                animationSpec = spring(dampingRatio = 0.86f, stiffness = Spring.StiffnessMediumLow),
                 label = "toggle_dot_color",
             )
             Box(
@@ -1296,33 +1369,13 @@ private fun AddressCapsule(
     val canArmLongPress = longPressSwipeUpAiChatEnabled || canLongPressSplit
 
     var isLongPressArmed by remember(isEditing) { mutableStateOf(false) }
-    var targetVisualDragX by remember(isEditing) { mutableFloatStateOf(0f) }
-    var targetVisualDragY by remember(isEditing) { mutableFloatStateOf(0f) }
+    val dragOffsetX = remember(isEditing) { Animatable(0f) }
+    val dragOffsetY = remember(isEditing) { Animatable(0f) }
 
-    val animatedDragXState = animateFloatAsState(
-        targetValue = if (isEditing) 0f else targetVisualDragX,
-        animationSpec = spring(dampingRatio = 0.78f, stiffness = 440f),
-        label = "address_capsule_drag_offset_x",
-    )
-    val animatedDragYState = animateFloatAsState(
-        targetValue = if (isEditing) 0f else targetVisualDragY,
-        animationSpec = spring(dampingRatio = 0.78f, stiffness = 460f),
-        label = "address_capsule_drag_offset_y",
-    )
     val armedScaleState = animateFloatAsState(
         targetValue = if (!isEditing && isLongPressArmed) 1.025f else 1f,
-        animationSpec = spring(dampingRatio = 0.72f, stiffness = 460f),
+        animationSpec = spring(dampingRatio = 0.76f, stiffness = Spring.StiffnessMediumLow),
         label = "address_capsule_armed_scale",
-    )
-    val targetStretch = if (!isEditing && isLongPressArmed && targetVisualDragY < 0f) {
-        (-targetVisualDragY / maxArmedLiftPx).coerceIn(0f, 1f)
-    } else {
-        0f
-    }
-    val animatedStretchState = animateFloatAsState(
-        targetValue = targetStretch,
-        animationSpec = spring(dampingRatio = 0.78f, stiffness = 440f),
-        label = "address_capsule_armed_stretch",
     )
 
     val focusRequester = remember { FocusRequester() }
@@ -1394,10 +1447,16 @@ private fun AddressCapsule(
         modifier = modifier
             .graphicsLayer {
                 transformOrigin = TransformOrigin(0.5f, 1f)
-                translationX = animatedDragXState.value
-                translationY = animatedDragYState.value
+                val dx = if (isEditing) 0f else dragOffsetX.value
+                val dy = if (isEditing) 0f else dragOffsetY.value
+                translationX = dx
+                translationY = dy
                 val scale = armedScaleState.value
-                val stretch = animatedStretchState.value
+                val stretch = if (!isEditing && dy < 0f && maxArmedLiftPx > 0f) {
+                    (-dy / maxArmedLiftPx).coerceIn(0f, 1f)
+                } else {
+                    0f
+                }
                 scaleX = scale + stretch * 0.03f
                 scaleY = scale + stretch * 0.14f
             }
@@ -1461,6 +1520,31 @@ private fun AddressCapsule(
                                 var armedLongPress = false
                                 var isDragging = false
                                 var longPressTimedOut = false
+                                val velocityTracker = VelocityTracker()
+                                velocityTracker.addPosition(down.uptimeMillis, down.position)
+
+                                fun springBackDragOffsets(vx: Float = 0f, vy: Float = 0f) {
+                                    gestureScope.launch {
+                                        dragOffsetX.animateTo(
+                                            targetValue = 0f,
+                                            initialVelocity = (vx * 0.35f).coerceIn(-1600f, 1600f),
+                                            animationSpec = spring(
+                                                dampingRatio = 0.80f,
+                                                stiffness = Spring.StiffnessMediumLow,
+                                            ),
+                                        )
+                                    }
+                                    gestureScope.launch {
+                                        dragOffsetY.animateTo(
+                                            targetValue = 0f,
+                                            initialVelocity = (vy * 0.35f).coerceIn(-1600f, 1600f),
+                                            animationSpec = spring(
+                                                dampingRatio = 0.80f,
+                                                stiffness = Spring.StiffnessMediumLow,
+                                            ),
+                                        )
+                                    }
+                                }
 
                                 try {
                                     // Phase A: Before touchSlop or Long-Press timeout
@@ -1506,6 +1590,7 @@ private fun AddressCapsule(
                                             return@awaitEachGesture
                                         }
 
+                                        velocityTracker.addPosition(change.uptimeMillis, change.position)
                                         val delta = change.positionChange()
                                         totalDx += delta.x
                                         totalDy += delta.y
@@ -1526,10 +1611,11 @@ private fun AddressCapsule(
                                             ?: event.changes.firstOrNull()
 
                                         if (change == null || !change.pressed) {
+                                            val releaseVel = runCatching { velocityTracker.calculateVelocity() }
+                                                .getOrDefault(androidx.compose.ui.unit.Velocity.Zero)
                                             if (armedLongPress) {
                                                 isLongPressArmed = false
-                                                targetVisualDragX = 0f
-                                                targetVisualDragY = 0f
+                                                springBackDragOffsets(releaseVel.x, releaseVel.y)
                                                 val horizontalDirectionAllowed = when {
                                                     allowedLongPressHorizontalDirection > 0 -> totalDx > 0f
                                                     allowedLongPressHorizontalDirection < 0 -> totalDx < 0f
@@ -1556,6 +1642,7 @@ private fun AddressCapsule(
                                                     latestOnTapToEdit()
                                                 }
                                             } else if (gesturesEnabled) {
+                                                springBackDragOffsets(releaseVel.x, releaseVel.y)
                                                 if (swipeLeftRightTabSwitch &&
                                                     abs(totalDx) > abs(totalDy) &&
                                                     abs(totalDx) > sensitivityPx
@@ -1576,6 +1663,7 @@ private fun AddressCapsule(
                                             break
                                         }
 
+                                        velocityTracker.addPosition(change.uptimeMillis, change.position)
                                         val delta = change.positionChange()
                                         totalDx += delta.x
                                         totalDy += delta.y
@@ -1590,29 +1678,41 @@ private fun AddressCapsule(
                                                 horizontalDragAllowed &&
                                                 abs(totalDx) > abs(totalDy)
                                             ) {
-                                                targetVisualDragY = 0f
-                                                targetVisualDragX = (totalDx * 0.42f).coerceIn(-maxVisualDragPx, maxVisualDragPx)
+                                                val nextX = (totalDx * 0.42f).coerceIn(-maxVisualDragPx, maxVisualDragPx)
+                                                gestureScope.launch {
+                                                    dragOffsetY.snapTo(0f)
+                                                    dragOffsetX.snapTo(nextX)
+                                                }
                                             } else if (longPressSwipeUpAiChatEnabled && totalDy < 0f) {
-                                                targetVisualDragX = 0f
-                                                targetVisualDragY = (totalDy * 0.42f).coerceIn(-maxArmedLiftPx, 0f)
+                                                val nextY = (totalDy * 0.42f).coerceIn(-maxArmedLiftPx, 0f)
+                                                gestureScope.launch {
+                                                    dragOffsetX.snapTo(0f)
+                                                    dragOffsetY.snapTo(nextY)
+                                                }
                                             } else {
-                                                targetVisualDragX = 0f
-                                                targetVisualDragY = 0f
+                                                gestureScope.launch {
+                                                    dragOffsetX.snapTo(0f)
+                                                    dragOffsetY.snapTo(0f)
+                                                }
                                             }
                                         } else if (gesturesEnabled) {
                                             change.consume()
-                                            targetVisualDragY = 0f
-                                            targetVisualDragX = if (swipeLeftRightTabSwitch && abs(totalDx) > abs(totalDy)) {
+                                            val nextX = if (swipeLeftRightTabSwitch && abs(totalDx) > abs(totalDy)) {
                                                 (totalDx * 0.42f).coerceIn(-maxVisualDragPx, maxVisualDragPx)
                                             } else {
                                                 0f
+                                            }
+                                            gestureScope.launch {
+                                                dragOffsetY.snapTo(0f)
+                                                dragOffsetX.snapTo(nextX)
                                             }
                                         }
                                     }
                                 } finally {
                                     isLongPressArmed = false
-                                    targetVisualDragX = 0f
-                                    targetVisualDragY = 0f
+                                    if (dragOffsetX.value != 0f || dragOffsetY.value != 0f) {
+                                        springBackDragOffsets()
+                                    }
                                 }
                             }
                         }
@@ -1680,8 +1780,16 @@ private fun AddressCapsule(
                     AnimatedContent(
                         targetState = isLoading,
                         transitionSpec = {
-                            (fadeIn(tween(150)) + scaleIn(initialScale = 0.85f)) togetherWith
-                                (fadeOut(tween(120)) + scaleOut(targetScale = 0.85f))
+                            (fadeIn(spring(dampingRatio = 0.88f, stiffness = Spring.StiffnessMedium)) +
+                                scaleIn(
+                                    initialScale = 0.84f,
+                                    animationSpec = spring(dampingRatio = 0.80f, stiffness = Spring.StiffnessMedium),
+                                )) togetherWith
+                                (fadeOut(spring(dampingRatio = 0.88f, stiffness = Spring.StiffnessMedium)) +
+                                    scaleOut(
+                                        targetScale = 0.84f,
+                                        animationSpec = spring(dampingRatio = 0.84f, stiffness = Spring.StiffnessMedium),
+                                    ))
                         },
                         label = "inner_reload_stop_morph",
                     ) { loading ->
@@ -1841,8 +1949,16 @@ private fun ToolbarActionIconButton(
             AnimatedContent(
                 targetState = isLoading,
                 transitionSpec = {
-                    (fadeIn(tween(150)) + scaleIn(initialScale = 0.85f)) togetherWith
-                        (fadeOut(tween(120)) + scaleOut(targetScale = 0.85f))
+                    (fadeIn(spring(dampingRatio = 0.88f, stiffness = Spring.StiffnessMedium)) +
+                        scaleIn(
+                            initialScale = 0.84f,
+                            animationSpec = spring(dampingRatio = 0.80f, stiffness = Spring.StiffnessMedium),
+                        )) togetherWith
+                        (fadeOut(spring(dampingRatio = 0.88f, stiffness = Spring.StiffnessMedium)) +
+                            scaleOut(
+                                targetScale = 0.84f,
+                                animationSpec = spring(dampingRatio = 0.84f, stiffness = Spring.StiffnessMedium),
+                            ))
                 },
                 label = "reload_stop_morph",
             ) { loading ->

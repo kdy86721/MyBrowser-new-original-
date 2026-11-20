@@ -5,6 +5,7 @@ import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -69,6 +70,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardType
@@ -147,6 +149,9 @@ fun PageSummarySheet(
         modifier = Modifier
             .fillMaxSize()
             .background(fullScreenBackground)
+            .pointerInput(Unit) {
+                detectTapGestures { /* consume stray taps above underlying WebView */ }
+            }
             .testTag("page_summary_sheet"),
         contentAlignment = Alignment.TopCenter,
     ) {
@@ -577,6 +582,8 @@ fun AiSettingsPage(
         systemPrompt: String?,
         providerSubtype: String?,
     ) -> Unit,
+    onTogglePinnedAiModel: (profileId: String, modelName: String) -> Unit,
+    onSetPinnedAiModels: (profileId: String, pinnedModels: List<String>) -> Unit,
     onAddCustomAiProfile: (
         name: String,
         cliType: String,
@@ -761,6 +768,8 @@ fun AiSettingsPage(
         innerRadius = innerRadius,
         onTestConnectionAndFetchModels = onTestConnectionAndFetchModels,
         onUpdateAiProfile = onUpdateAiProfile,
+        onTogglePinnedAiModel = onTogglePinnedAiModel,
+        onSetPinnedAiModels = onSetPinnedAiModels,
     )
 }
 
@@ -782,6 +791,8 @@ private fun PerAiModelConfigSection(
         systemPrompt: String?,
         providerSubtype: String?,
     ) -> Unit,
+    onTogglePinnedAiModel: (profileId: String, modelName: String) -> Unit,
+    onSetPinnedAiModels: (profileId: String, pinnedModels: List<String>) -> Unit,
 ) {
     val cardShape = RoundedCornerShape(unifiedRadius)
     var customModelDraft by remember(profile.id) { mutableStateOf("") }
@@ -1133,9 +1144,9 @@ private fun PerAiModelConfigSection(
             }
         }
 
-        // Dynamic Model Selection Chips
+        // Dynamic Model Selection Chips (Active default model)
         Text(
-            text = "사용할 모델 선택 (${profile.availableModels.size}개)",
+            text = "기본 사용 모델 선택 (${profile.availableModels.size}개)",
             style = MaterialTheme.typography.labelMedium,
             color = FrostSlate,
         )
@@ -1177,7 +1188,7 @@ private fun PerAiModelConfigSection(
                             )
                             .clickable {
                                 onUpdateAiProfile(profile.id, null, null, null, modelName, null, null, null)
-                                savedBanner = "모델이 '$modelName'(으)로 변경되었습니다."
+                                savedBanner = "기본 모델이 '$modelName'(으)로 변경되었습니다."
                             }
                             .padding(horizontal = 12.dp, vertical = 8.dp)
                             .testTag("ai_model_chip_$modelName"),
@@ -1188,6 +1199,140 @@ private fun PerAiModelConfigSection(
                             style = MaterialTheme.typography.labelMedium,
                             color = if (selected) PureFrost else FrostSlate,
                         )
+                    }
+                }
+            }
+
+            // Curated Dropdown Model Pinning Section
+            val effectivePinned = remember(profile.pinnedModels, profile.selectedModel) {
+                profile.dropdownModels()
+            }
+            val effectivePinnedSet = remember(effectivePinned) { effectivePinned.toSet() }
+            val pinCandidates = remember(profile.availableModels, effectivePinned) {
+                (profile.availableModels + effectivePinned).distinct()
+            }
+
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(innerRadius))
+                    .background(ObsidianVoid.copy(alpha = 0.50f))
+                    .border(0.5.dp, Color.White.copy(alpha = 0.10f), RoundedCornerShape(innerRadius))
+                    .padding(12.dp)
+                    .testTag("ai_pinned_models_section"),
+                verticalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                ) {
+                    Text(
+                        text = "드롭다운 표시 모델: ${effectivePinned.size}개 선택됨",
+                        style = MaterialTheme.typography.labelMedium,
+                        color = IceCyan,
+                        modifier = Modifier
+                            .weight(1f)
+                            .testTag("ai_pinned_models_counter"),
+                    )
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(2.dp),
+                    ) {
+                        TextButton(
+                            onClick = {
+                                onSetPinnedAiModels(profile.id, pinCandidates)
+                                savedBanner = "모든 모델(${pinCandidates.size}개)을 드롭다운에 표시합니다."
+                            },
+                            modifier = Modifier.testTag("ai_pin_all_models_button"),
+                        ) {
+                            Text(
+                                text = "전체 선택",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = IceCyan,
+                            )
+                        }
+                        TextButton(
+                            onClick = {
+                                onSetPinnedAiModels(profile.id, emptyList())
+                                savedBanner = "드롭다운 표시 모델이 기본 모델로 초기화되었습니다."
+                            },
+                            modifier = Modifier.testTag("ai_reset_pinned_models_button"),
+                        ) {
+                            Text(
+                                text = "초기화",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = FrostSlate,
+                            )
+                        }
+                    }
+                }
+
+                Text(
+                    text = "AI 대화 상단 모델 드롭다운에 표시할 즐겨찾기 모델을 선택하세요.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = FrostSlate,
+                )
+
+                FlowRow(
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    pinCandidates.forEach { modelName ->
+                        val isPinned = modelName in effectivePinnedSet
+                        val isActiveModel = modelName == profile.selectedModel
+                        val chipShape = RoundedCornerShape(innerRadius)
+                        Row(
+                            modifier = Modifier
+                                .clip(chipShape)
+                                .background(
+                                    if (isPinned) EmeraldSecure.copy(alpha = 0.18f)
+                                    else ObsidianElevated.copy(alpha = 0.55f)
+                                )
+                                .border(
+                                    width = 0.75.dp,
+                                    color = if (isPinned) EmeraldSecure.copy(alpha = 0.72f)
+                                    else Color.White.copy(alpha = 0.12f),
+                                    shape = chipShape,
+                                )
+                                .clickable {
+                                    if (isActiveModel && isPinned) {
+                                        savedBanner = "현재 사용 중인 모델은 드롭다운에 항상 표시됩니다."
+                                    } else {
+                                        onTogglePinnedAiModel(profile.id, modelName)
+                                        savedBanner = if (isPinned) {
+                                            "'$modelName' 모델을 드롭다운에서 숨겼습니다."
+                                        } else {
+                                            "'$modelName' 모델을 드롭다운에 추가했습니다."
+                                        }
+                                    }
+                                }
+                                .padding(horizontal = 10.dp, vertical = 7.dp)
+                                .testTag("ai_pin_model_chip_$modelName"),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(5.dp),
+                        ) {
+                            if (isPinned) {
+                                Icon(
+                                    imageVector = Icons.Rounded.Check,
+                                    contentDescription = null,
+                                    tint = EmeraldSecure,
+                                    modifier = Modifier.size(14.dp),
+                                )
+                            }
+                            Text(
+                                text = modelName,
+                                style = MaterialTheme.typography.labelMedium,
+                                color = if (isPinned) PureFrost else FrostSlate,
+                            )
+                            if (isActiveModel) {
+                                Text(
+                                    text = "기본",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = IceCyan,
+                                )
+                            }
+                        }
                     }
                 }
             }

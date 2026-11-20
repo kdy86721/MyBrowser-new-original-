@@ -893,4 +893,142 @@ class ExampleUnitTest {
             restored.getSnapshot().preferences.foldableSplitCompanionMode,
         )
     }
+
+    @Test
+    fun `closing tabs below 2 disables dual pane and navigation ticks preserve https security`() {
+        val core = LocalKotlinCore(initialHomeUrl = "https://duckduckgo.com")
+        val tab1 = core.getSnapshot().activeTabId
+        val tab2 = core.createTab("https://kotlinlang.org", activate = true).activeTabId
+
+        core.updateFoldableSettings(dualPaneEnabled = true)
+        assertTrue(core.getSnapshot().preferences.foldableDualPaneEnabled)
+
+        // Blank-URL progress update must preserve HTTPS SecurityState.SECURE
+        val afterProgressTick = core.updateTabNavigation(
+            tabId = tab2,
+            url = "",
+            title = "Kotlin",
+            canGoBack = false,
+            canGoForward = false,
+            isLoading = true,
+            progress = 45,
+        )
+        assertEquals("https://kotlinlang.org", afterProgressTick.activeTab?.url)
+        assertEquals(SecurityState.SECURE, afterProgressTick.activeTab?.securityState)
+
+        // Closing down to 1 remaining tab atomically exits dual-pane mode
+        val afterCloseToSingle = core.closeTab(tab2)
+        assertEquals(1, afterCloseToSingle.tabs.size)
+        assertEquals(tab1, afterCloseToSingle.activeTabId)
+        assertFalse(afterCloseToSingle.preferences.foldableDualPaneEnabled)
+
+        // Late WebView callback for already-closed tab must be ignored safely
+        val afterStaleUpdate = core.updateTabNavigation(
+            tabId = tab2,
+            url = "https://stale.example.com",
+            title = "Stale",
+            canGoBack = true,
+            canGoForward = false,
+            isLoading = false,
+            progress = 100,
+        )
+        assertEquals(1, afterStaleUpdate.tabs.size)
+        assertEquals(tab1, afterStaleUpdate.activeTabId)
+        assertEquals("https://duckduckgo.com", afterStaleUpdate.activeTab?.url)
+    }
+
+    @Test
+    fun `expanded korean and global ad blocker domains block planbplus and preserve legitimate hosts`() {
+        val core = LocalKotlinCore()
+        // When adBlockEnabled is false, nothing is blocked
+        assertFalse(core.shouldBlockUrl("https://ad.planbplus.co.kr/banner?id=1"))
+
+        core.toggleAdBlock()
+        assertTrue(core.shouldBlockUrl("https://ad.planbplus.co.kr/iframe/ad.html"))
+        assertTrue(core.shouldBlockUrl("https://sub.planbplus.co.kr/slot"))
+        assertTrue(core.shouldBlockUrl("https://api.dable.io/widget"))
+        assertTrue(core.shouldBlockUrl("https://log.mobon.net/pixel"))
+        assertTrue(core.shouldBlockUrl("https://adfit.kakao.com/ad"))
+        assertTrue(core.shouldBlockUrl("https://siape.veta.naver.com/fxshow"))
+        assertTrue(core.shouldBlockUrl("https://cdn.widerplanet.com/js/wp.js"))
+        assertTrue(core.shouldBlockUrl("https://static.criteo.net/js/ld/ld.js"))
+        assertTrue(core.shouldBlockUrl("https://ads.pubmatic.com/AdServer/js"))
+
+        // Legitimate Korean & global sites must NOT be blocked
+        assertFalse(core.shouldBlockUrl("https://www.naver.com/"))
+        assertFalse(core.shouldBlockUrl("https://news.daum.net/"))
+        assertFalse(core.shouldBlockUrl("https://t1.daumcdn.net/news/image.jpg"))
+        assertFalse(core.shouldBlockUrl("https://www.google.com/search?q=test"))
+    }
+
+    @Test
+    fun `ai pinnedModels curation filters dropdownModels, supports toggle select-all reset, and survives json roundtrip`() {
+        val core = LocalKotlinCore()
+        core.selectAiProfile("gemini_cli")
+
+        // Fetching a large list of models should keep the AI Chat dropdown compact (only selectedModel initially)
+        val fetchedModels = listOf(
+            "gemini-2.5-pro",
+            "gemini-2.5-flash",
+            "gemini-2.0-flash",
+            "gemini-1.5-pro",
+            "gemini-1.5-flash",
+        )
+        core.setAiProfileModels("gemini_cli", fetchedModels)
+        val afterFetch = core.getSnapshot().preferences.activeAiProfile()
+        assertEquals(5, afterFetch.availableModels.size)
+        assertEquals("gemini-2.5-pro", afterFetch.selectedModel)
+        assertEquals(listOf("gemini-2.5-pro"), afterFetch.dropdownModels())
+
+        // Pin additional favorite model -> appears in dropdownModels()
+        core.togglePinnedAiModel("gemini_cli", "gemini-2.5-flash")
+        assertEquals(
+            listOf("gemini-2.5-pro", "gemini-2.5-flash"),
+            core.getSnapshot().preferences.activeAiProfile().dropdownModels(),
+        )
+
+        // Active selectedModel cannot be unpinned out of dropdownModels()
+        core.togglePinnedAiModel("gemini_cli", "gemini-2.5-pro")
+        assertTrue("gemini-2.5-pro" in core.getSnapshot().preferences.activeAiProfile().dropdownModels())
+
+        // Non-active pinned model can be unpinned cleanly
+        core.togglePinnedAiModel("gemini_cli", "gemini-2.5-flash")
+        assertEquals(
+            listOf("gemini-2.5-pro"),
+            core.getSnapshot().preferences.activeAiProfile().dropdownModels(),
+        )
+
+        // Select All pins every available model
+        core.setPinnedAiModels("gemini_cli", fetchedModels)
+        assertEquals(fetchedModels, core.getSnapshot().preferences.activeAiProfile().dropdownModels())
+
+        // JSON persistence roundtrip preserves pinnedModels
+        core.setPinnedAiModels("gemini_cli", listOf("gemini-2.5-pro", "gemini-2.0-flash"))
+        val exported = core.exportStateJson()
+        val restored = LocalKotlinCore()
+        assertTrue(restored.importStateJson(exported))
+        assertEquals(
+            listOf("gemini-2.5-pro", "gemini-2.0-flash"),
+            restored.getSnapshot().preferences.activeAiProfile().dropdownModels(),
+        )
+
+        // Reset collapses pinnedModels back to active selectedModel only
+        restored.setPinnedAiModels("gemini_cli", emptyList())
+        assertEquals(
+            listOf("gemini-2.5-pro"),
+            restored.getSnapshot().preferences.activeAiProfile().dropdownModels(),
+        )
+
+        // Legacy profile with empty pinnedModels falls back to selectedModel in dropdownModels()
+        val legacyProfile = AiCliProfile(
+            id = "legacy",
+            name = "Legacy",
+            cliType = AiCliProfile.CLI_TYPE_CUSTOM,
+            endpointOrCommand = "http://127.0.0.1:8080/v1",
+            selectedModel = "my-local-model",
+            availableModels = listOf("my-local-model", "other-model"),
+            pinnedModels = emptyList(),
+        )
+        assertEquals(listOf("my-local-model"), legacyProfile.dropdownModels())
+    }
 }

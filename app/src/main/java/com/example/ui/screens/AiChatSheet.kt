@@ -83,6 +83,7 @@ import androidx.compose.ui.graphics.TransformOrigin
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.input.pointer.util.VelocityTracker
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.testTag
@@ -281,15 +282,15 @@ fun AiChatSheet(
                     modifier = Modifier
                         .fillMaxWidth()
                         .pointerInput(chatState.sessionSeed, dismissThresholdPx, quickFlickThresholdPx) {
-                            var lastDragAmount = 0f
+                            val velocityTracker = VelocityTracker()
                             detectVerticalDragGestures(
                                 onDragStart = {
-                                    lastDragAmount = 0f
+                                    velocityTracker.resetTracking()
                                 },
                                 onVerticalDrag = { change, dragAmount ->
                                     if (isDismissingByDrag) return@detectVerticalDragGestures
                                     change.consume()
-                                    lastDragAmount = dragAmount
+                                    velocityTracker.addPosition(change.uptimeMillis, change.position)
                                     val nextY = (dragOffsetY.value + dragAmount).coerceAtLeast(0f)
                                     coroutineScope.launch {
                                         dragOffsetY.snapTo(nextY)
@@ -297,17 +298,19 @@ fun AiChatSheet(
                                 },
                                 onDragEnd = {
                                     if (isDismissingByDrag) return@detectVerticalDragGestures
+                                    val vy = runCatching { velocityTracker.calculateVelocity().y }.getOrDefault(0f)
                                     val currentY = dragOffsetY.value
                                     val shouldDismiss = currentY > dismissThresholdPx ||
-                                        (currentY > quickFlickThresholdPx && lastDragAmount > 12f)
+                                        (currentY > quickFlickThresholdPx && vy > 650f)
                                     if (shouldDismiss) {
                                         isDismissingByDrag = true
                                         coroutineScope.launch {
                                             val collapseDistance = (modalHeightPx.takeIf { it > 0 }?.toFloat() ?: 900f) * 0.65f
                                             dragOffsetY.animateTo(
                                                 targetValue = collapseDistance,
+                                                initialVelocity = vy.coerceAtLeast(0f),
                                                 animationSpec = spring(
-                                                    dampingRatio = 0.86f,
+                                                    dampingRatio = 0.84f,
                                                     stiffness = Spring.StiffnessMediumLow,
                                                 ),
                                             )
@@ -317,9 +320,10 @@ fun AiChatSheet(
                                         coroutineScope.launch {
                                             dragOffsetY.animateTo(
                                                 targetValue = 0f,
+                                                initialVelocity = vy,
                                                 animationSpec = spring(
-                                                    dampingRatio = 0.78f,
-                                                    stiffness = Spring.StiffnessMedium,
+                                                    dampingRatio = 0.80f,
+                                                    stiffness = Spring.StiffnessMediumLow,
                                                 ),
                                             )
                                         }
@@ -331,8 +335,8 @@ fun AiChatSheet(
                                             dragOffsetY.animateTo(
                                                 targetValue = 0f,
                                                 animationSpec = spring(
-                                                    dampingRatio = 0.78f,
-                                                    stiffness = Spring.StiffnessMedium,
+                                                    dampingRatio = 0.80f,
+                                                    stiffness = Spring.StiffnessMediumLow,
                                                 ),
                                             )
                                         }
@@ -583,6 +587,14 @@ fun AiChatSheet(
                             }
                         }
 
+                        val dropdownModels = remember(
+                            activeProfile.id,
+                            activeProfile.pinnedModels,
+                            activeProfile.selectedModel,
+                        ) {
+                            activeProfile.dropdownModels()
+                        }
+
                         DropdownMenu(
                             expanded = isModelMenuExpanded,
                             onDismissRequest = { isModelMenuExpanded = false },
@@ -595,7 +607,7 @@ fun AiChatSheet(
                                 .widthIn(min = modelMenuMinWidth, max = 300.dp)
                                 .testTag("ai_chat_model_dropdown_menu"),
                         ) {
-                            if (activeProfile.availableModels.isEmpty()) {
+                            if (dropdownModels.isEmpty()) {
                                 AiDropdownMenuRow(
                                     label = "불러온 모델 없음",
                                     icon = Icons.Rounded.AutoAwesome,
@@ -605,7 +617,7 @@ fun AiChatSheet(
                                     onClick = {},
                                 )
                             } else {
-                                activeProfile.availableModels.forEach { modelName ->
+                                dropdownModels.forEach { modelName ->
                                     val isSelected = modelName == activeProfile.selectedModel
                                     AiDropdownMenuRow(
                                         label = modelName,
@@ -693,35 +705,6 @@ fun AiChatSheet(
                         .fillMaxWidth(),
                     verticalArrangement = Arrangement.spacedBy(10.dp),
                 ) {
-                    if (chatState.messages.isEmpty() && !chatState.isLoading && chatState.errorMessage.isNullOrBlank()) {
-                        item {
-                            LiquidGlassSurface(
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .padding(top = 6.dp),
-                                shape = cardShape,
-                                glassOpacity = 0.14f,
-                                shadowElevation = 8.dp,
-                            ) {
-                                Column(
-                                    modifier = Modifier.padding(18.dp),
-                                    verticalArrangement = Arrangement.spacedBy(8.dp),
-                                ) {
-                                    Text(
-                                        text = "현재 페이지 URL이 입력창에 준비되었습니다",
-                                        style = MaterialTheme.typography.titleMedium,
-                                        color = PureFrost,
-                                    )
-                                    Text(
-                                        text = "Enter 키로 줄바꿈하여 여러 문단을 작성한 뒤 우측 전송 버튼을 눌러 ${activeProfile.name}와 대화를 시작하세요.",
-                                        style = MaterialTheme.typography.bodyMedium,
-                                        color = FrostSlate,
-                                    )
-                                }
-                            }
-                        }
-                    }
-
                     itemsIndexed(
                         items = chatState.messages,
                         key = { idx, msg -> "${idx}_${msg.isUser}_${msg.text.hashCode()}" },

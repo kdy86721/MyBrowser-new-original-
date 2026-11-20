@@ -22,6 +22,7 @@ import android.view.ViewGroup
 import android.webkit.CookieManager
 import android.webkit.GeolocationPermissions
 import android.webkit.PermissionRequest
+import android.webkit.RenderProcessGoneDetail
 import android.webkit.SslErrorHandler
 import android.webkit.ValueCallback
 import android.webkit.WebChromeClient
@@ -43,11 +44,9 @@ import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedVisibility
-import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.Spring
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.spring
-import androidx.compose.animation.core.tween
 import androidx.compose.animation.expandVertically
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
@@ -58,13 +57,17 @@ import androidx.compose.animation.slideInHorizontally
 import androidx.compose.animation.slideInVertically
 import androidx.compose.animation.slideOutHorizontally
 import androidx.compose.animation.slideOutVertically
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxScope
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.asPaddingValues
 import androidx.compose.foundation.layout.fillMaxHeight
@@ -72,13 +75,22 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBars
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.rounded.ArrowBack
+import androidx.compose.material.icons.rounded.CloudOff
+import androidx.compose.material.icons.rounded.Refresh
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -98,10 +110,13 @@ import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.TransformOrigin
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
@@ -155,10 +170,12 @@ import com.example.storage.BrowserStateStorage
 import com.example.ui.theme.AmberWarn
 import com.example.ui.theme.FrostSlate
 import com.example.ui.theme.IceCyan
+import com.example.ui.theme.LiquidGlassSurface
 import com.example.ui.theme.MyBrowserTheme
 import com.example.ui.theme.ObsidianElevated
 import com.example.ui.theme.ObsidianVoid
 import com.example.ui.theme.PureFrost
+import com.example.ui.theme.unifiedInnerRadius
 import com.example.webview.BLOB_DOWNLOAD_JS_BRIDGE_NAME
 import com.example.webview.BlobDownloadBridge
 import com.example.webview.WebViewExternalNavigator
@@ -175,6 +192,7 @@ import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
+import org.json.JSONObject
 import java.io.ByteArrayInputStream
 import kotlin.math.roundToInt
 
@@ -606,6 +624,14 @@ class BrowserViewModel(
         )
     }
 
+    fun togglePinnedAiModel(profileId: String, modelName: String) {
+        core.togglePinnedAiModel(profileId = profileId, modelName = modelName)
+    }
+
+    fun setPinnedAiModels(profileId: String, pinnedModels: List<String>) {
+        core.setPinnedAiModels(profileId = profileId, pinnedModels = pinnedModels)
+    }
+
     fun addCustomAiProfile(
         name: String,
         cliType: String,
@@ -914,6 +940,15 @@ private fun MyBrowserRootScreen(
     val tabScrollPositions = remember { mutableMapOf<String, Pair<Int, Int>>() }
     val tabScrollCallbacks = remember { mutableMapOf<String, (Int, Int, Boolean) -> Unit>() }
     val tabThumbnails = remember { mutableStateMapOf<String, Bitmap>() }
+    val tabMainFrameErrors = remember { mutableStateMapOf<String, WebMainFrameError>() }
+
+    val onMainFrameErrorChanged: (String, WebMainFrameError?) -> Unit = { id, error ->
+        if (error == null) {
+            tabMainFrameErrors.remove(id)
+        } else {
+            tabMainFrameErrors[id] = error
+        }
+    }
 
     fun captureTabThumbnail(tabId: String, wv: WebView?): Bitmap? {
         if (wv == null) return null
@@ -1144,8 +1179,10 @@ private fun MyBrowserRootScreen(
                     }
                     webViewPool.forEach { (id, wv) ->
                         if (id in visibleIds) {
-                            wv.onResume()
-                            wv.resumeTimers()
+                            runCatching {
+                                wv.onResume()
+                                wv.resumeTimers()
+                            }
                         }
                     }
                 }
@@ -1153,7 +1190,7 @@ private fun MyBrowserRootScreen(
                     saveAllNonIncognitoWebViews()
                     flushCookiesSafely()
                     webViewPool.values.forEach { wv ->
-                        wv.onPause()
+                        runCatching { wv.onPause() }
                     }
                     viewModel.persistConfigSync()
                 }
@@ -1174,7 +1211,14 @@ private fun MyBrowserRootScreen(
     // Cleanly destroy closed tab WebViews & remove stale thumbnails/scroll state to eliminate CPU/memory leaks
     LaunchedEffect(snapshot.tabs) {
         val openIds = snapshot.tabs.map { it.id }.toSet()
-        val staleIds = (webViewPool.keys + tabThumbnails.keys + tabLastUsedMs.keys + tabScrollPositions.keys + tabScrollCallbacks.keys)
+        val staleIds = (
+            webViewPool.keys +
+                tabThumbnails.keys +
+                tabLastUsedMs.keys +
+                tabScrollPositions.keys +
+                tabScrollCallbacks.keys +
+                tabMainFrameErrors.keys
+            )
             .distinct()
             .filter { it !in openIds }
         staleIds.forEach { staleId ->
@@ -1183,6 +1227,7 @@ private fun MyBrowserRootScreen(
             tabLastUsedMs.remove(staleId)
             tabScrollPositions.remove(staleId)
             tabScrollCallbacks.remove(staleId)
+            tabMainFrameErrors.remove(staleId)
             webViewPool.remove(staleId)?.let { wv ->
                 destroyWebViewCleanly(wv)
             }
@@ -1203,6 +1248,7 @@ private fun MyBrowserRootScreen(
             tabLastUsedMs.clear()
             tabScrollPositions.clear()
             tabScrollCallbacks.clear()
+            tabMainFrameErrors.clear()
             saveAllNonIncognitoWebViews()
             flushCookiesSafely()
             viewModel.persistConfigSync()
@@ -1256,9 +1302,17 @@ private fun MyBrowserRootScreen(
         var mergeAnchorSide by remember { mutableIntStateOf(0) }
         var mergingOutgoingTab by remember { mutableStateOf<BrowserTabState?>(null) }
         var lastDualHingeGapDp by remember { mutableStateOf(12.dp) }
+        var webViewRecoveryTick by remember { mutableIntStateOf(0) }
+        val handleRenderProcessGone: (String, WebView) -> Unit = { crashedTabId, crashedWv ->
+            if (webViewPool[crashedTabId] === crashedWv) {
+                webViewPool.remove(crashedTabId)
+            }
+            destroyWebViewCleanly(crashedWv)
+            webViewRecoveryTick += 1
+        }
         val splitExpandProgress by animateFloatAsState(
             targetValue = if (isDualPaneActive) 1f else 0f,
-            animationSpec = spring(dampingRatio = 0.86f, stiffness = 360f),
+            animationSpec = spring(dampingRatio = 0.84f, stiffness = Spring.StiffnessMediumLow),
             label = "dual_pane_split_merge_progress",
         )
 
@@ -1327,11 +1381,13 @@ private fun MyBrowserRootScreen(
             visibleIds.forEach { id -> tabLastUsedMs[id] = now }
             webViewPool.forEach { (id, wv) ->
                 if (id in visibleIds) {
-                    wv.onResume()
-                    wv.resumeTimers()
+                    runCatching {
+                        wv.onResume()
+                        wv.resumeTimers()
+                    }
                 } else {
                     tabScrollPositions[id] = Pair(wv.scrollX, wv.scrollY)
-                    wv.onPause()
+                    runCatching { wv.onPause() }
                 }
             }
             evictBackgroundWebViews(
@@ -1477,6 +1533,8 @@ private fun MyBrowserRootScreen(
                                 onSslError = onSslErrorReceived,
                                 onFocusPrimaryPane = { focusedPaneIndex = targetPane },
                                 onCaptureThumbnail = { id, wv -> captureTabThumbnail(id, wv) },
+                                onRenderProcessGone = handleRenderProcessGone,
+                                onMainFrameErrorChanged = onMainFrameErrorChanged,
                                 resultMsg = msg,
                             )
                         },
@@ -1485,6 +1543,8 @@ private fun MyBrowserRootScreen(
                         onHideCustomView = onHideFullscreenVideo,
                         onSslError = onSslErrorReceived,
                         onCaptureThumbnail = { wv -> captureTabThumbnail(newTab.id, wv) },
+                        onRenderProcessGone = { wv -> handleRenderProcessGone(newTab.id, wv) },
+                        onMainFrameErrorChanged = { err -> onMainFrameErrorChanged(newTab.id, err) },
                     )
                     webViewPool[newTab.id] = popupWebView
                     tabLastUsedMs[newTab.id] = System.currentTimeMillis()
@@ -2024,7 +2084,10 @@ private fun MyBrowserRootScreen(
             } else {
                 0f
             },
-            animationSpec = tween(durationMillis = 300, easing = FastOutSlowInEasing),
+            animationSpec = spring(
+                dampingRatio = 0.86f,
+                stiffness = Spring.StiffnessMediumLow,
+            ),
             label = "browser_push_parallax",
         )
 
@@ -2144,6 +2207,10 @@ private fun MyBrowserRootScreen(
                                         onHideCustomView = onHideFullscreenVideo,
                                         onSslError = onSslErrorReceived,
                                         onCaptureThumbnail = { id, wv -> captureTabThumbnail(id, wv) },
+                                        mainFrameError = tabMainFrameErrors[leftSlotTab.id],
+                                        onMainFrameErrorChanged = onMainFrameErrorChanged,
+                                        recoveryTick = webViewRecoveryTick,
+                                        onRenderProcessGone = handleRenderProcessGone,
                                         modifier = Modifier
                                             .fillMaxSize()
                                             .testTag(
@@ -2217,6 +2284,10 @@ private fun MyBrowserRootScreen(
                                         onHideCustomView = onHideFullscreenVideo,
                                         onSslError = onSslErrorReceived,
                                         onCaptureThumbnail = { id, wv -> captureTabThumbnail(id, wv) },
+                                        mainFrameError = tabMainFrameErrors[rightSlotTab.id],
+                                        onMainFrameErrorChanged = onMainFrameErrorChanged,
+                                        recoveryTick = webViewRecoveryTick,
+                                        onRenderProcessGone = handleRenderProcessGone,
                                         modifier = Modifier
                                             .fillMaxSize()
                                             .testTag(
@@ -2375,11 +2446,11 @@ private fun MyBrowserRootScreen(
         AnimatedVisibility(
             visible = activeOverlay == PushOverlay.SETTINGS,
             enter = slideInHorizontally(
-                animationSpec = tween(durationMillis = 300, easing = FastOutSlowInEasing),
+                animationSpec = spring(dampingRatio = 0.86f, stiffness = Spring.StiffnessMediumLow),
                 initialOffsetX = { it },
             ),
             exit = slideOutHorizontally(
-                animationSpec = tween(durationMillis = 260, easing = FastOutSlowInEasing),
+                animationSpec = spring(dampingRatio = 0.88f, stiffness = Spring.StiffnessMediumLow),
                 targetOffsetX = { it },
             ),
         ) {
@@ -2457,6 +2528,12 @@ private fun MyBrowserRootScreen(
                         systemPrompt = prompt,
                         providerSubtype = subtype,
                     )
+                },
+                onTogglePinnedAiModel = { profileId, modelName ->
+                    viewModel.togglePinnedAiModel(profileId, modelName)
+                },
+                onSetPinnedAiModels = { profileId, pinnedModels ->
+                    viewModel.setPinnedAiModels(profileId, pinnedModels)
                 },
                 onAddCustomAiProfile = { name, cliType, endpoint, apiKey, model ->
                     viewModel.addCustomAiProfile(
@@ -2555,11 +2632,11 @@ private fun MyBrowserRootScreen(
         AnimatedVisibility(
             visible = activeOverlay == PushOverlay.HISTORY,
             enter = slideInHorizontally(
-                animationSpec = tween(durationMillis = 300, easing = FastOutSlowInEasing),
+                animationSpec = spring(dampingRatio = 0.86f, stiffness = Spring.StiffnessMediumLow),
                 initialOffsetX = { it },
             ),
             exit = slideOutHorizontally(
-                animationSpec = tween(durationMillis = 260, easing = FastOutSlowInEasing),
+                animationSpec = spring(dampingRatio = 0.88f, stiffness = Spring.StiffnessMediumLow),
                 targetOffsetX = { it },
             ),
         ) {
@@ -2585,11 +2662,11 @@ private fun MyBrowserRootScreen(
         AnimatedVisibility(
             visible = activeOverlay == PushOverlay.SUMMARY,
             enter = slideInHorizontally(
-                animationSpec = tween(durationMillis = 300, easing = FastOutSlowInEasing),
+                animationSpec = spring(dampingRatio = 0.86f, stiffness = Spring.StiffnessMediumLow),
                 initialOffsetX = { it },
             ),
             exit = slideOutHorizontally(
-                animationSpec = tween(durationMillis = 260, easing = FastOutSlowInEasing),
+                animationSpec = spring(dampingRatio = 0.88f, stiffness = Spring.StiffnessMediumLow),
                 targetOffsetX = { it },
             ),
         ) {
@@ -2610,8 +2687,8 @@ private fun MyBrowserRootScreen(
         // 4.5 Physical Bottom-Origin Modal Expansion from Address Bar: Liquid Glass AI Chat
         AnimatedVisibility(
             visible = activeOverlay == PushOverlay.AI_CHAT,
-            enter = fadeIn(animationSpec = tween(durationMillis = 220)),
-            exit = fadeOut(animationSpec = tween(durationMillis = 170)),
+            enter = fadeIn(animationSpec = spring(dampingRatio = 0.88f, stiffness = Spring.StiffnessMediumLow)),
+            exit = fadeOut(animationSpec = spring(dampingRatio = 0.88f, stiffness = Spring.StiffnessMediumLow)),
         ) {
             Box(
                 modifier = Modifier
@@ -2633,13 +2710,13 @@ private fun MyBrowserRootScreen(
                 enter = slideInVertically(
                     initialOffsetY = { fullHeight -> (fullHeight * 0.72f).toInt() },
                     animationSpec = spring(
-                        dampingRatio = 0.78f,
+                        dampingRatio = 0.80f,
                         stiffness = Spring.StiffnessLow,
                     ),
                 ) + expandVertically(
                     expandFrom = Alignment.Bottom,
                     animationSpec = spring(
-                        dampingRatio = 0.8f,
+                        dampingRatio = 0.82f,
                         stiffness = Spring.StiffnessLow,
                     ),
                 ) + scaleIn(
@@ -2649,27 +2726,27 @@ private fun MyBrowserRootScreen(
                         dampingRatio = 0.82f,
                         stiffness = Spring.StiffnessLow,
                     ),
-                ) + fadeIn(animationSpec = tween(durationMillis = 180)),
+                ) + fadeIn(animationSpec = spring(dampingRatio = 0.88f, stiffness = Spring.StiffnessMediumLow)),
                 exit = slideOutVertically(
                     targetOffsetY = { fullHeight -> (fullHeight * 0.72f).toInt() },
                     animationSpec = spring(
-                        dampingRatio = 0.84f,
+                        dampingRatio = 0.86f,
                         stiffness = Spring.StiffnessMediumLow,
                     ),
                 ) + shrinkVertically(
                     shrinkTowards = Alignment.Bottom,
                     animationSpec = spring(
-                        dampingRatio = 0.84f,
+                        dampingRatio = 0.86f,
                         stiffness = Spring.StiffnessMediumLow,
                     ),
                 ) + scaleOut(
                     targetScale = 0.88f,
                     transformOrigin = TransformOrigin(0.5f, 1f),
                     animationSpec = spring(
-                        dampingRatio = 0.84f,
+                        dampingRatio = 0.86f,
                         stiffness = Spring.StiffnessMediumLow,
                     ),
-                ) + fadeOut(animationSpec = tween(durationMillis = 150)),
+                ) + fadeOut(animationSpec = spring(dampingRatio = 0.88f, stiffness = Spring.StiffnessMediumLow)),
             ) {
                 AiChatSheet(
                     chatState = aiChatUiState,
@@ -2711,8 +2788,16 @@ private fun MyBrowserRootScreen(
         // 5. Full-Screen 2-Column Grid Preview Tab Switcher
         AnimatedVisibility(
             visible = isGridTabSwitcherOpen && activeOverlay == PushOverlay.NONE && fullscreenVideoView == null,
-            enter = fadeIn(tween(220)) + scaleIn(initialScale = 0.96f),
-            exit = fadeOut(tween(180)) + scaleOut(targetScale = 0.96f),
+            enter = fadeIn(spring(dampingRatio = 0.88f, stiffness = Spring.StiffnessMediumLow)) +
+                scaleIn(
+                    initialScale = 0.96f,
+                    animationSpec = spring(dampingRatio = 0.84f, stiffness = Spring.StiffnessMediumLow),
+                ),
+            exit = fadeOut(spring(dampingRatio = 0.88f, stiffness = Spring.StiffnessMediumLow)) +
+                scaleOut(
+                    targetScale = 0.96f,
+                    animationSpec = spring(dampingRatio = 0.86f, stiffness = Spring.StiffnessMediumLow),
+                ),
         ) {
             GridTabSwitcherScreen(
                 snapshot = gridSwitcherSnapshot,
@@ -2866,6 +2951,65 @@ private data class PendingSslError(
     val handler: SslErrorHandler,
 )
 
+private data class WebMainFrameError(
+    val url: String,
+    val host: String,
+    val errorCode: Int,
+    val description: String,
+)
+
+private fun describeWebErrorReason(errorCode: Int, description: String): String {
+    val upper = description.uppercase()
+    return when {
+        upper.contains("ERR_NAME_NOT_RESOLVED") || errorCode == WebViewClient.ERROR_HOST_LOOKUP ->
+            "서버 주소를 찾을 수 없습니다. 주소 오타나 네트워크 연결 상태를 확인해 주세요."
+        upper.contains("ERR_INTERNET_DISCONNECTED") || upper.contains("ERR_NETWORK_CHANGED") ->
+            "인터넷에 연결되어 있지 않습니다. Wi-Fi 또는 모바일 데이터를 확인한 뒤 다시 시도해 주세요."
+        upper.contains("ERR_CONNECTION_TIMED_OUT") || errorCode == WebViewClient.ERROR_TIMEOUT ->
+            "서버 응답 시간이 초과되었습니다. 잠시 후 다시 시도해 주세요."
+        upper.contains("ERR_CONNECTION_REFUSED") || errorCode == WebViewClient.ERROR_CONNECT ->
+            "서버가 연결을 거부했습니다. 사이트가 일시적으로 점검 중일 수 있습니다."
+        upper.contains("ERR_ADDRESS_UNREACHABLE") ->
+            "네트워크에서 해당 서버에 도달할 수 없습니다."
+        else ->
+            "네트워크 오류로 인해 페이지를 불러오지 못했습니다. 잠시 후 다시 시도해 주세요."
+    }
+}
+
+private fun buildHideFailedIframeScript(failedUrl: String, failedHost: String): String {
+    val quotedUrl = JSONObject.quote(failedUrl.lowercase())
+    val quotedHost = JSONObject.quote(failedHost.lowercase())
+    return """
+        (function() {
+          try {
+            var targetUrl = $quotedUrl;
+            var targetHost = $quotedHost;
+            var frames = document.querySelectorAll('iframe');
+            for (var i = 0; i < frames.length; i++) {
+              var el = frames[i];
+              var rawSrc = (el.getAttribute('src') || el.src || el.getAttribute('data-src') || '').toLowerCase();
+              var matched = false;
+              if (targetHost && rawSrc.indexOf(targetHost) !== -1) {
+                matched = true;
+              } else if (targetUrl && rawSrc && (rawSrc === targetUrl || targetUrl.indexOf(rawSrc) !== -1)) {
+                matched = true;
+              }
+              if (matched) {
+                el.style.setProperty('display', 'none', 'important');
+                el.style.setProperty('height', '0', 'important');
+                el.style.setProperty('min-height', '0', 'important');
+                el.style.setProperty('max-height', '0', 'important');
+                el.style.setProperty('width', '0', 'important');
+                el.style.setProperty('border', '0', 'important');
+                el.style.setProperty('visibility', 'hidden', 'important');
+                el.setAttribute('aria-hidden', 'true');
+              }
+            }
+          } catch (e) {}
+        })();
+    """.trimIndent()
+}
+
 private fun describeSslErrorReason(errorCode: Int): String = when (errorCode) {
     SslError.SSL_EXPIRED -> "이 사이트의 보안 인증서가 만료되었습니다."
     SslError.SSL_IDMISMATCH -> "인증서의 도메인 이름이 접속하려는 주소와 일치하지 않습니다."
@@ -2877,6 +3021,162 @@ private fun describeSslErrorReason(errorCode: Int): String = when (errorCode) {
 
 private fun flushCookiesSafely() {
     runCatching { CookieManager.getInstance().flush() }
+}
+
+@Composable
+private fun WebMainFrameErrorOverlay(
+    error: WebMainFrameError,
+    unifiedRadius: Dp,
+    canGoBack: Boolean,
+    onRetry: () -> Unit,
+    onGoBack: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    val cardShape = RoundedCornerShape(unifiedRadius)
+    val innerRadius = unifiedInnerRadius(unifiedRadius)
+    val buttonShape = RoundedCornerShape(innerRadius)
+    val reasonText = remember(error.errorCode, error.description) {
+        describeWebErrorReason(error.errorCode, error.description)
+    }
+
+    Box(
+        modifier = modifier
+            .fillMaxSize()
+            .background(ObsidianVoid)
+            .padding(horizontal = 24.dp)
+            .padding(bottom = 96.dp)
+            .testTag("webview_main_frame_error_overlay"),
+        contentAlignment = Alignment.Center,
+    ) {
+        LiquidGlassSurface(
+            modifier = Modifier
+                .fillMaxWidth()
+                .widthIn(max = 420.dp),
+            shape = cardShape,
+            glassOpacity = 0.16f,
+            shadowElevation = 14.dp,
+        ) {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 22.dp, vertical = 24.dp),
+                horizontalAlignment = Alignment.CenterHorizontally,
+                verticalArrangement = Arrangement.spacedBy(12.dp),
+            ) {
+                Box(
+                    modifier = Modifier
+                        .size(56.dp)
+                        .clip(CircleShape)
+                        .background(AmberWarn.copy(alpha = 0.14f))
+                        .border(0.75.dp, AmberWarn.copy(alpha = 0.42f), CircleShape),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Icon(
+                        imageVector = Icons.Rounded.CloudOff,
+                        contentDescription = null,
+                        tint = AmberWarn,
+                        modifier = Modifier.size(28.dp),
+                    )
+                }
+
+                Text(
+                    text = "페이지를 불러올 수 없습니다",
+                    style = MaterialTheme.typography.titleLarge,
+                    color = PureFrost,
+                    textAlign = TextAlign.Center,
+                )
+
+                Text(
+                    text = reasonText,
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = FrostSlate,
+                    textAlign = TextAlign.Center,
+                )
+
+                if (error.host.isNotBlank() || error.description.isNotBlank()) {
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clip(buttonShape)
+                            .background(ObsidianElevated.copy(alpha = 0.72f))
+                            .border(0.5.dp, Color.White.copy(alpha = 0.10f), buttonShape)
+                            .padding(horizontal = 12.dp, vertical = 9.dp),
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                        verticalArrangement = Arrangement.spacedBy(3.dp),
+                    ) {
+                        if (error.host.isNotBlank()) {
+                            Text(
+                                text = error.host,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                                style = MaterialTheme.typography.labelMedium,
+                                color = PureFrost,
+                            )
+                        }
+                        if (error.description.isNotBlank()) {
+                            Text(
+                                text = error.description,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                                style = MaterialTheme.typography.labelSmall,
+                                color = FrostSlate,
+                            )
+                        }
+                    }
+                }
+
+                Spacer(Modifier.height(4.dp))
+
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(10.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    if (canGoBack) {
+                        OutlinedButton(
+                            onClick = onGoBack,
+                            shape = buttonShape,
+                            border = BorderStroke(0.75.dp, Color.White.copy(alpha = 0.18f)),
+                            modifier = Modifier
+                                .weight(1f)
+                                .height(48.dp)
+                                .testTag("webview_error_back_button"),
+                        ) {
+                            Icon(
+                                imageVector = Icons.AutoMirrored.Rounded.ArrowBack,
+                                contentDescription = null,
+                                tint = PureFrost,
+                                modifier = Modifier.size(18.dp),
+                            )
+                            Spacer(Modifier.width(6.dp))
+                            Text("뒤로가기", color = PureFrost, style = MaterialTheme.typography.labelLarge)
+                        }
+                    }
+
+                    Button(
+                        onClick = onRetry,
+                        shape = buttonShape,
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = IceCyan,
+                            contentColor = ObsidianVoid,
+                        ),
+                        modifier = Modifier
+                            .weight(1f)
+                            .height(48.dp)
+                            .testTag("webview_error_retry_button"),
+                    ) {
+                        Icon(
+                            imageVector = Icons.Rounded.Refresh,
+                            contentDescription = null,
+                            modifier = Modifier.size(18.dp),
+                        )
+                        Spacer(Modifier.width(6.dp))
+                        Text("다시 시도", style = MaterialTheme.typography.labelLarge)
+                    }
+                }
+            }
+        }
+    }
 }
 
 @Composable
@@ -2901,6 +3201,10 @@ private fun WebViewPane(
     onHideCustomView: () -> Unit,
     onSslError: (SslErrorHandler, SslError?) -> Unit,
     onCaptureThumbnail: (tabId: String, webView: WebView) -> Unit,
+    mainFrameError: WebMainFrameError? = null,
+    onMainFrameErrorChanged: (tabId: String, error: WebMainFrameError?) -> Unit = { _, _ -> },
+    recoveryTick: Int = 0,
+    onRenderProcessGone: (tabId: String, webView: WebView) -> Unit = { _, _ -> },
     modifier: Modifier = Modifier,
 ) {
     val latestOnPaneFocused by rememberUpdatedState(onPaneFocused)
@@ -2914,6 +3218,8 @@ private fun WebViewPane(
     val latestOnHideCustomView by rememberUpdatedState(onHideCustomView)
     val latestOnSslError by rememberUpdatedState(onSslError)
     val latestOnCaptureThumbnail by rememberUpdatedState(onCaptureThumbnail)
+    val latestOnMainFrameErrorChanged by rememberUpdatedState(onMainFrameErrorChanged)
+    val latestOnRenderProcessGone by rememberUpdatedState(onRenderProcessGone)
 
     var attachedContainer by remember { mutableStateOf<FrameLayout?>(null) }
     val paneScrollCallback = remember(tab.id) {
@@ -2949,108 +3255,151 @@ private fun WebViewPane(
             )
         }
 
-        AndroidView(
-            factory = { ctx ->
-                FrameLayout(ctx).apply {
-                    layoutParams = ViewGroup.LayoutParams(
-                        ViewGroup.LayoutParams.MATCH_PARENT,
-                        ViewGroup.LayoutParams.MATCH_PARENT,
-                    )
-                }.also { attachedContainer = it }
-            },
-            update = { container ->
-                attachedContainer = container
-                tabScrollCallbacks[tab.id] = paneScrollCallback
-                val targetWebView = webViewPool.getOrPut(tab.id) {
-                    tabLastUsedMs[tab.id] = System.currentTimeMillis()
-                    createConfiguredWebView(
-                        context = container.context,
-                        tabId = tab.id,
-                        initialUrl = tab.url,
-                        restoredBundle = viewModel.getTabBundle(tab.id),
-                        restoredScrollPosition = consumeSavedScrollPosition(tab.id),
+        Box(
+            modifier = Modifier
+                .weight(1f)
+                .fillMaxWidth(),
+        ) {
+            AndroidView(
+                factory = { ctx ->
+                    FrameLayout(ctx).apply {
+                        layoutParams = ViewGroup.LayoutParams(
+                            ViewGroup.LayoutParams.MATCH_PARENT,
+                            ViewGroup.LayoutParams.MATCH_PARENT,
+                        )
+                    }.also { attachedContainer = it }
+                },
+                update = { container ->
+                    @Suppress("UNUSED_EXPRESSION")
+                    recoveryTick // Subscribe update block to renderer-crash recovery triggers
+                    attachedContainer = container
+                    tabScrollCallbacks[tab.id] = paneScrollCallback
+                    val targetWebView = webViewPool.getOrPut(tab.id) {
+                        tabLastUsedMs[tab.id] = System.currentTimeMillis()
+                        createConfiguredWebView(
+                            context = container.context,
+                            tabId = tab.id,
+                            initialUrl = tab.url,
+                            restoredBundle = viewModel.getTabBundle(tab.id),
+                            restoredScrollPosition = consumeSavedScrollPosition(tab.id),
+                            preferences = preferences,
+                            isDesktopMode = tab.isDesktopMode,
+                            viewModel = viewModel,
+                            onScrollDelta = { dy, sy, scrollable ->
+                                tabScrollCallbacks[tab.id]?.invoke(dy, sy, scrollable)
+                            },
+                            onOpenFileChooser = { cb, params ->
+                                latestOnOpenFileChooser(cb, params)
+                            },
+                            onPermissionRequest = { req ->
+                                latestOnPermissionRequest(req)
+                            },
+                            onGeolocationPrompt = { origin, cb ->
+                                latestOnGeolocationPrompt(origin, cb)
+                            },
+                            onCreateNewWindow = { msg ->
+                                latestOnCreateNewWindow(msg)
+                            },
+                            onCloseWindow = { wv ->
+                                latestOnCloseWindow(wv)
+                            },
+                            onShowCustomView = { view, cb ->
+                                latestOnShowCustomView(view, cb)
+                            },
+                            onHideCustomView = {
+                                latestOnHideCustomView()
+                            },
+                            onSslError = { handler, err ->
+                                latestOnSslError(handler, err)
+                            },
+                            onCaptureThumbnail = { wv ->
+                                latestOnCaptureThumbnail(tab.id, wv)
+                            },
+                            onRenderProcessGone = { wv ->
+                                latestOnRenderProcessGone(tab.id, wv)
+                            },
+                            onMainFrameErrorChanged = { err ->
+                                latestOnMainFrameErrorChanged(tab.id, err)
+                            },
+                        )
+                    }
+
+                    // Always re-bind independent scroll & touch listeners to this pane's live callbacks
+                    // so pooled WebViews moved between Single, Left, and Right panes never keep stale hooks.
+                    targetWebView.setOnScrollChangeListener { v, _, scrollY, _, oldScrollY ->
+                        val dy = scrollY - oldScrollY
+                        val isScrollable = v.canScrollVertically(1) || v.canScrollVertically(-1)
+                        paneScrollCallback(dy, scrollY, isScrollable)
+                    }
+
+                    targetWebView.setOnTouchListener { _, event ->
+                        if (event.actionMasked == MotionEvent.ACTION_DOWN) {
+                            latestOnPaneFocused()
+                        }
+                        false
+                    }
+
+                    applyRuntimeWebSettings(
+                        webView = targetWebView,
                         preferences = preferences,
                         isDesktopMode = tab.isDesktopMode,
-                        viewModel = viewModel,
-                        onScrollDelta = { dy, sy, scrollable ->
-                            tabScrollCallbacks[tab.id]?.invoke(dy, sy, scrollable)
-                        },
-                        onOpenFileChooser = { cb, params ->
-                            latestOnOpenFileChooser(cb, params)
-                        },
-                        onPermissionRequest = { req ->
-                            latestOnPermissionRequest(req)
-                        },
-                        onGeolocationPrompt = { origin, cb ->
-                            latestOnGeolocationPrompt(origin, cb)
-                        },
-                        onCreateNewWindow = { msg ->
-                            latestOnCreateNewWindow(msg)
-                        },
-                        onCloseWindow = { wv ->
-                            latestOnCloseWindow(wv)
-                        },
-                        onShowCustomView = { view, cb ->
-                            latestOnShowCustomView(view, cb)
-                        },
-                        onHideCustomView = {
-                            latestOnHideCustomView()
-                        },
-                        onSslError = { handler, err ->
-                            latestOnSslError(handler, err)
-                        },
-                        onCaptureThumbnail = { wv ->
-                            latestOnCaptureThumbnail(tab.id, wv)
-                        },
                     )
-                }
 
-                // Always re-bind independent scroll & touch listeners to this pane's live callbacks
-                // so pooled WebViews moved between Single, Left, and Right panes never keep stale hooks.
-                targetWebView.setOnScrollChangeListener { v, _, scrollY, _, oldScrollY ->
-                    val dy = scrollY - oldScrollY
-                    val isScrollable = v.canScrollVertically(1) || v.canScrollVertically(-1)
-                    paneScrollCallback(dy, scrollY, isScrollable)
-                }
-
-                targetWebView.setOnTouchListener { _, event ->
-                    if (event.actionMasked == MotionEvent.ACTION_DOWN) {
-                        latestOnPaneFocused()
+                    val currentChild = if (container.childCount > 0) container.getChildAt(0) else null
+                    if (currentChild !== targetWebView) {
+                        container.removeAllViews()
+                        (targetWebView.parent as? ViewGroup)?.removeView(targetWebView)
+                        container.addView(
+                            targetWebView,
+                            FrameLayout.LayoutParams(
+                                ViewGroup.LayoutParams.MATCH_PARENT,
+                                ViewGroup.LayoutParams.MATCH_PARENT,
+                            ),
+                        )
                     }
-                    false
-                }
-
-                applyRuntimeWebSettings(
-                    webView = targetWebView,
-                    preferences = preferences,
-                    isDesktopMode = tab.isDesktopMode,
-                )
-
-                val currentChild = if (container.childCount > 0) container.getChildAt(0) else null
-                if (currentChild !== targetWebView) {
+                },
+                onRelease = { container ->
+                    for (i in 0 until container.childCount) {
+                        val child = container.getChildAt(i)
+                        if (child is WebView) {
+                            child.setOnTouchListener(null)
+                            child.setOnScrollChangeListener(null)
+                        }
+                    }
                     container.removeAllViews()
-                    (targetWebView.parent as? ViewGroup)?.removeView(targetWebView)
-                    container.addView(
-                        targetWebView,
-                        FrameLayout.LayoutParams(
-                            ViewGroup.LayoutParams.MATCH_PARENT,
-                            ViewGroup.LayoutParams.MATCH_PARENT,
-                        ),
-                    )
-                }
-            },
-            onRelease = { container ->
-                for (i in 0 until container.childCount) {
-                    val child = container.getChildAt(i)
-                    if (child is WebView) {
-                        child.setOnTouchListener(null)
-                        child.setOnScrollChangeListener(null)
-                    }
-                }
-                container.removeAllViews()
-            },
-            modifier = Modifier.fillMaxSize(),
-        )
+                },
+                modifier = Modifier.fillMaxSize(),
+            )
+
+            if (mainFrameError != null) {
+                WebMainFrameErrorOverlay(
+                    error = mainFrameError,
+                    unifiedRadius = preferences.barCornerRadiusDp.dp,
+                    canGoBack = tab.canGoBack,
+                    onRetry = {
+                        latestOnMainFrameErrorChanged(tab.id, null)
+                        val wv = webViewPool[tab.id]
+                        if (wv != null) {
+                            val retryUrl = mainFrameError.url.ifBlank { tab.url }
+                            if (retryUrl.isNotBlank() && retryUrl != "about:blank") {
+                                wv.loadUrl(retryUrl)
+                            } else {
+                                wv.reload()
+                            }
+                        }
+                    },
+                    onGoBack = {
+                        latestOnMainFrameErrorChanged(tab.id, null)
+                        webViewPool[tab.id]?.let { wv ->
+                            if (wv.canGoBack()) {
+                                wv.goBack()
+                            }
+                        }
+                    },
+                    modifier = Modifier.fillMaxSize(),
+                )
+            }
+        }
     }
 }
 
@@ -3069,6 +3418,8 @@ private fun createPopupHelper(
     onSslError: (SslErrorHandler, SslError?) -> Unit,
     onFocusPrimaryPane: () -> Unit,
     onCaptureThumbnail: (String, WebView) -> Unit,
+    onRenderProcessGone: (String, WebView) -> Unit,
+    onMainFrameErrorChanged: (String, WebMainFrameError?) -> Unit,
     resultMsg: Message,
 ): Boolean {
     val transport = resultMsg.obj as? WebView.WebViewTransport ?: return false
@@ -3111,6 +3462,8 @@ private fun createPopupHelper(
                 onSslError = onSslError,
                 onFocusPrimaryPane = onFocusPrimaryPane,
                 onCaptureThumbnail = onCaptureThumbnail,
+                onRenderProcessGone = onRenderProcessGone,
+                onMainFrameErrorChanged = onMainFrameErrorChanged,
                 resultMsg = nestedMsg,
             )
         },
@@ -3119,6 +3472,8 @@ private fun createPopupHelper(
         onHideCustomView = onHideCustomView,
         onSslError = onSslError,
         onCaptureThumbnail = { wv -> onCaptureThumbnail(newTab.id, wv) },
+        onRenderProcessGone = { wv -> onRenderProcessGone(newTab.id, wv) },
+        onMainFrameErrorChanged = { err -> onMainFrameErrorChanged(newTab.id, err) },
     )
     webViewPool[newTab.id] = popupWebView
     tabLastUsedMs[newTab.id] = System.currentTimeMillis()
@@ -3348,6 +3703,8 @@ private fun createConfiguredWebView(
     onHideCustomView: () -> Unit,
     onSslError: (SslErrorHandler, SslError?) -> Unit,
     onCaptureThumbnail: (WebView) -> Unit,
+    onRenderProcessGone: (WebView) -> Unit = {},
+    onMainFrameErrorChanged: (WebMainFrameError?) -> Unit = {},
 ): WebView {
     var pendingScrollRestore = restoredScrollPosition
 
@@ -3422,9 +3779,24 @@ private fun createConfiguredWebView(
             ): WebResourceResponse? {
                 val url = request?.url?.toString().orEmpty()
                 if (url.isNotEmpty() && viewModel.shouldBlockUrl(url)) {
+                    val headers = request?.requestHeaders
+                    val isLikelyIframe = request?.isForMainFrame == false && (
+                        headers?.get("Sec-Fetch-Dest").equals("iframe", ignoreCase = true) ||
+                            headers?.get("Accept")?.contains("text/html", ignoreCase = true) == true
+                        )
+                    if (isLikelyIframe && view != null) {
+                        val blockedHost = request?.url?.host.orEmpty()
+                        val hideScript = buildHideFailedIframeScript(url, blockedHost)
+                        view.post {
+                            runCatching { view.evaluateJavascript(hideScript, null) }
+                        }
+                        view.postDelayed({
+                            runCatching { view.evaluateJavascript(hideScript, null) }
+                        }, 250L)
+                    }
                     return WebResourceResponse(
                         "text/plain",
-                        "utf-8",
+                        "UTF-8",
                         ByteArrayInputStream(ByteArray(0)),
                     )
                 }
@@ -3446,6 +3818,9 @@ private fun createConfiguredWebView(
             override fun onPageStarted(view: WebView?, url: String?, favicon: Bitmap?) {
                 onScrollDelta(0, 0, false)
                 val resolved = url ?: view?.url.orEmpty()
+                if (resolved.isNotBlank() && resolved != "about:blank") {
+                    onMainFrameErrorChanged(null)
+                }
                 viewModel.updateTabNavigation(
                     tabId = tabId,
                     url = resolved,
@@ -3519,19 +3894,57 @@ private fun createConfiguredWebView(
                 request: WebResourceRequest?,
                 error: WebResourceError?,
             ) {
-                super.onReceivedError(view, request, error)
-                if (request?.isForMainFrame == true) {
-                    val resolved = request.url?.toString() ?: view?.url.orEmpty()
-                    viewModel.updateTabNavigation(
-                        tabId = tabId,
-                        url = resolved,
-                        title = view?.title.orEmpty(),
-                        canGoBack = view?.canGoBack() == true,
-                        canGoForward = view?.canGoForward() == true,
-                        isLoading = false,
-                        progress = 100,
+                val isMainFrame = request?.isForMainFrame == true
+                val failedUrl = request?.url?.toString().orEmpty()
+                val failedHost = request?.url?.host.orEmpty()
+                val errorCode = error?.errorCode ?: WebViewClient.ERROR_UNKNOWN
+                val description = error?.description?.toString().orEmpty()
+
+                if (!isMainFrame) {
+                    // Subframe / ad iframe error (e.g., net::ERR_NAME_NOT_RESOLVED on ad.planbplus.co.kr):
+                    // Never show a fallback error screen; silently collapse the broken iframe element.
+                    if (view != null && (failedHost.isNotBlank() || failedUrl.isNotBlank())) {
+                        val hideScript = buildHideFailedIframeScript(failedUrl, failedHost)
+                        view.post {
+                            runCatching { view.evaluateJavascript(hideScript, null) }
+                        }
+                        view.postDelayed({
+                            runCatching { view.evaluateJavascript(hideScript, null) }
+                        }, 250L)
+                    }
+                    return
+                }
+
+                // Ignore aborted navigations (e.g., user tapped another link or external intent handled it)
+                if (description.contains("ERR_ABORTED", ignoreCase = true) ||
+                    errorCode == WebViewClient.ERROR_UNSUPPORTED_SCHEME
+                ) {
+                    return
+                }
+
+                val resolved = failedUrl.ifBlank { view?.url.orEmpty() }
+                val resolvedHost = failedHost.ifBlank {
+                    runCatching { Uri.parse(resolved).host }.getOrNull().orEmpty()
+                }
+                view?.post {
+                    onMainFrameErrorChanged(
+                        WebMainFrameError(
+                            url = resolved,
+                            host = resolvedHost,
+                            errorCode = errorCode,
+                            description = description,
+                        )
                     )
                 }
+                viewModel.updateTabNavigation(
+                    tabId = tabId,
+                    url = resolved,
+                    title = view?.title.orEmpty(),
+                    canGoBack = view?.canGoBack() == true,
+                    canGoForward = view?.canGoForward() == true,
+                    isLoading = false,
+                    progress = 100,
+                )
             }
 
             override fun onReceivedSslError(
@@ -3541,6 +3954,15 @@ private fun createConfiguredWebView(
             ) {
                 if (handler == null) return
                 onSslError(handler, error)
+            }
+
+            override fun onRenderProcessGone(
+                view: WebView?,
+                detail: RenderProcessGoneDetail?,
+            ): Boolean {
+                val crashedView = view ?: targetWebView
+                onRenderProcessGone(crashedView)
+                return true
             }
         }
 
@@ -3657,12 +4079,23 @@ private fun applyRuntimeWebSettings(
     isDesktopMode: Boolean,
 ) {
     webView.settings.apply {
-        javaScriptEnabled = preferences.javaScriptEnabled
-        loadsImagesAutomatically = !preferences.imagesBlocked
-        blockNetworkImage = preferences.imagesBlocked
-        useWideViewPort = true
-        loadWithOverviewMode = true
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+        if (javaScriptEnabled != preferences.javaScriptEnabled) {
+            javaScriptEnabled = preferences.javaScriptEnabled
+        }
+        val shouldLoadImages = !preferences.imagesBlocked
+        if (loadsImagesAutomatically != shouldLoadImages) {
+            loadsImagesAutomatically = shouldLoadImages
+        }
+        if (blockNetworkImage != preferences.imagesBlocked) {
+            blockNetworkImage = preferences.imagesBlocked
+        }
+        if (!useWideViewPort) {
+            useWideViewPort = true
+        }
+        if (!loadWithOverviewMode) {
+            loadWithOverviewMode = true
+        }
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O && safeBrowsingEnabled) {
             safeBrowsingEnabled = false
         }
         val desiredUa = if (isDesktopMode) {
@@ -3676,10 +4109,13 @@ private fun applyRuntimeWebSettings(
     }
 
     if (WebViewFeature.isFeatureSupported(WebViewFeature.ALGORITHMIC_DARKENING)) {
-        WebSettingsCompat.setAlgorithmicDarkeningAllowed(
-            webView.settings,
-            preferences.algorithmicDarkeningEnabled,
-        )
+        val currentDark = WebSettingsCompat.isAlgorithmicDarkeningAllowed(webView.settings)
+        if (currentDark != preferences.algorithmicDarkeningEnabled) {
+            WebSettingsCompat.setAlgorithmicDarkeningAllowed(
+                webView.settings,
+                preferences.algorithmicDarkeningEnabled,
+            )
+        }
     }
 }
 

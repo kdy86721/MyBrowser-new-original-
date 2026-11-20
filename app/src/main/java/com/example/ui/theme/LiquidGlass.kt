@@ -1,7 +1,8 @@
 package com.example.ui.theme
 
 import androidx.compose.animation.animateColorAsState
-import androidx.compose.animation.core.tween
+import androidx.compose.animation.core.Spring
+import androidx.compose.animation.core.spring
 import androidx.compose.foundation.background
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.Box
@@ -66,7 +67,7 @@ fun LiquidGlassSurface(
         } else {
             Color.White.copy(alpha = (0.28f + clampedSheen * 0.85f).coerceAtMost(0.75f))
         },
-        animationSpec = tween(durationMillis = 220),
+        animationSpec = spring(dampingRatio = 0.86f, stiffness = Spring.StiffnessMediumLow),
         label = "liquid_glass_top_rim",
     )
 
@@ -76,7 +77,7 @@ fun LiquidGlassSurface(
         } else {
             Color.White.copy(alpha = (0.10f + clampedSheen * 0.35f).coerceAtMost(0.32f))
         },
-        animationSpec = tween(durationMillis = 220),
+        animationSpec = spring(dampingRatio = 0.86f, stiffness = Spring.StiffnessMediumLow),
         label = "liquid_glass_mid_rim",
     )
 
@@ -207,20 +208,26 @@ fun PerimeterLoadingRing(
             val strokeStyle = Stroke(width = strokePx, cap = StrokeCap.Round)
 
             onDrawBehind {
-                val ringAlpha = alphaProvider().coerceIn(0f, 1f)
-                if (ringAlpha <= 0.01f || totalLength <= 0f) return@onDrawBehind
+                val rawAlpha = alphaProvider()
+                val ringAlpha = if (rawAlpha.isFinite()) rawAlpha.coerceIn(0f, 1f) else 0f
+                if (ringAlpha <= 0.01f || !totalLength.isFinite() || totalLength <= 0f) return@onDrawBehind
 
-                val fraction = progressProvider().coerceIn(0f, 1f)
+                val rawFraction = progressProvider()
+                val fraction = if (rawFraction.isFinite()) rawFraction.coerceIn(0f, 1f) else 0f
                 val stopDistance = (totalLength * fraction).coerceIn(0f, totalLength)
-                if (stopDistance > 0f) {
+                if (stopDistance > 0f && stopDistance.isFinite()) {
                     segmentPath.reset()
-                    pathMeasure.getSegment(0f, stopDistance, segmentPath, startWithMoveTo = true)
-                    drawPath(
-                        path = segmentPath,
-                        brush = sweepBrush,
-                        alpha = ringAlpha,
-                        style = strokeStyle,
-                    )
+                    val hasSegment = runCatching {
+                        pathMeasure.getSegment(0f, stopDistance, segmentPath, startWithMoveTo = true)
+                    }.getOrDefault(false)
+                    if (hasSegment && !segmentPath.isEmpty) {
+                        drawPath(
+                            path = segmentPath,
+                            brush = sweepBrush,
+                            alpha = ringAlpha,
+                            style = strokeStyle,
+                        )
+                    }
                 }
             }
         }

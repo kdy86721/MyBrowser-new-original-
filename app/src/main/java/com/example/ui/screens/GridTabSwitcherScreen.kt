@@ -3,11 +3,10 @@ package com.example.ui.screens
 import android.graphics.Bitmap
 import androidx.activity.compose.BackHandler
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.core.Animatable
-import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.Spring
 import androidx.compose.animation.core.spring
-import androidx.compose.animation.core.tween
 import androidx.compose.animation.expandVertically
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
@@ -18,6 +17,7 @@ import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.gestures.detectVerticalDragGestures
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
@@ -103,6 +103,7 @@ import androidx.compose.ui.input.nestedscroll.NestedScrollSource
 import androidx.compose.ui.input.nestedscroll.nestedScroll
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.input.pointer.positionChange
+import androidx.compose.ui.input.pointer.util.VelocityTracker
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalHapticFeedback
@@ -209,7 +210,11 @@ fun GridTabSwitcherScreen(
             coroutineScope.launch {
                 dismissOffsetY.animateTo(
                     targetValue = maxDismissVisualPx,
-                    animationSpec = tween(durationMillis = 180, easing = FastOutSlowInEasing),
+                    initialVelocity = velocityY.coerceAtLeast(0f),
+                    animationSpec = spring(
+                        dampingRatio = 0.86f,
+                        stiffness = Spring.StiffnessMediumLow,
+                    ),
                 )
                 latestOnDismiss()
             }
@@ -217,8 +222,9 @@ fun GridTabSwitcherScreen(
             coroutineScope.launch {
                 dismissOffsetY.animateTo(
                     targetValue = 0f,
+                    initialVelocity = velocityY,
                     animationSpec = spring(
-                        dampingRatio = 0.78f,
+                        dampingRatio = 0.80f,
                         stiffness = Spring.StiffnessMediumLow,
                     ),
                 )
@@ -300,6 +306,9 @@ fun GridTabSwitcherScreen(
                 scaleY = scale
             }
             .background(backdropBrush)
+            .pointerInput(Unit) {
+                detectTapGestures { /* consume stray taps above underlying WebView */ }
+            }
             .nestedScroll(swipeDownDismissConnection)
             .testTag("grid_tab_switcher_screen"),
         contentAlignment = Alignment.TopCenter,
@@ -324,16 +333,23 @@ fun GridTabSwitcherScreen(
                 modifier = Modifier
                     .fillMaxWidth()
                     .pointerInput(Unit) {
+                        val velocityTracker = VelocityTracker()
                         detectVerticalDragGestures(
-                            onVerticalDrag = { _, dragAmount ->
+                            onDragStart = { velocityTracker.resetTracking() },
+                            onVerticalDrag = { change, dragAmount ->
                                 if (dismissTriggered) return@detectVerticalDragGestures
+                                change.consume()
+                                velocityTracker.addPosition(change.uptimeMillis, change.position)
                                 if (dragAmount > 0f || dismissOffsetY.value > 0f) {
                                     val next = (dismissOffsetY.value + dragAmount * 0.9f)
                                         .coerceIn(0f, maxDismissVisualPx)
                                     coroutineScope.launch { dismissOffsetY.snapTo(next) }
                                 }
                             },
-                            onDragEnd = { finishOrResetWindowDismiss() },
+                            onDragEnd = {
+                                val vy = runCatching { velocityTracker.calculateVelocity().y }.getOrDefault(0f)
+                                finishOrResetWindowDismiss(velocityY = vy)
+                            },
                             onDragCancel = { finishOrResetWindowDismiss() },
                         )
                     },
@@ -513,18 +529,43 @@ private fun TopTabSegmentedPill(
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(4.dp),
         ) {
+            val colorSpring = spring<Color>(dampingRatio = 0.86f, stiffness = Spring.StiffnessMediumLow)
             val tabSelected = selectedSegment == 0
+            val tabBg by animateColorAsState(
+                targetValue = if (tabSelected) IceCyan.copy(alpha = 0.24f) else Color.Transparent,
+                animationSpec = colorSpring,
+                label = "segment_tab_bg",
+            )
+            val tabBorder by animateColorAsState(
+                targetValue = if (tabSelected) IceCyan.copy(alpha = 0.65f) else Color.Transparent,
+                animationSpec = colorSpring,
+                label = "segment_tab_border",
+            )
+            val tabIconTint by animateColorAsState(
+                targetValue = if (tabSelected) IceCyan else FrostSlate,
+                animationSpec = colorSpring,
+                label = "segment_tab_icon",
+            )
+            val tabTextColor by animateColorAsState(
+                targetValue = if (tabSelected) PureFrost else FrostSlate,
+                animationSpec = colorSpring,
+                label = "segment_tab_text",
+            )
+            val tabBadgeBg by animateColorAsState(
+                targetValue = if (tabSelected) IceCyan else Color.White.copy(alpha = 0.14f),
+                animationSpec = colorSpring,
+                label = "segment_tab_badge_bg",
+            )
+
             Row(
                 modifier = Modifier
                     .weight(1f)
                     .height(38.dp)
                     .clip(RoundedCornerShape(innerRadius))
-                    .background(
-                        if (tabSelected) IceCyan.copy(alpha = 0.24f) else Color.Transparent
-                    )
+                    .background(tabBg)
                     .border(
                         width = if (tabSelected) 0.75.dp else 0.dp,
-                        color = if (tabSelected) IceCyan.copy(alpha = 0.65f) else Color.Transparent,
+                        color = tabBorder,
                         shape = RoundedCornerShape(innerRadius),
                     )
                     .clickable(
@@ -540,7 +581,7 @@ private fun TopTabSegmentedPill(
                 Icon(
                     imageVector = Icons.Rounded.GridView,
                     contentDescription = null,
-                    tint = if (tabSelected) IceCyan else FrostSlate,
+                    tint = tabIconTint,
                     modifier = Modifier.size(16.dp),
                 )
                 Spacer(Modifier.width(6.dp))
@@ -548,15 +589,13 @@ private fun TopTabSegmentedPill(
                     text = "탭",
                     maxLines = 1,
                     style = MaterialTheme.typography.labelMedium,
-                    color = if (tabSelected) PureFrost else FrostSlate,
+                    color = tabTextColor,
                 )
                 Spacer(Modifier.width(6.dp))
                 Box(
                     modifier = Modifier
                         .clip(CircleShape)
-                        .background(
-                            if (tabSelected) IceCyan else Color.White.copy(alpha = 0.14f)
-                        )
+                        .background(tabBadgeBg)
                         .padding(horizontal = 6.dp, vertical = 1.dp),
                     contentAlignment = Alignment.Center,
                 ) {
@@ -573,17 +612,41 @@ private fun TopTabSegmentedPill(
             }
 
             val groupSelected = selectedSegment == 1
+            val groupBg by animateColorAsState(
+                targetValue = if (groupSelected) IceCyan.copy(alpha = 0.24f) else Color.Transparent,
+                animationSpec = colorSpring,
+                label = "segment_group_bg",
+            )
+            val groupBorder by animateColorAsState(
+                targetValue = if (groupSelected) IceCyan.copy(alpha = 0.65f) else Color.Transparent,
+                animationSpec = colorSpring,
+                label = "segment_group_border",
+            )
+            val groupIconTint by animateColorAsState(
+                targetValue = if (groupSelected) IceCyan else FrostSlate,
+                animationSpec = colorSpring,
+                label = "segment_group_icon",
+            )
+            val groupTextColor by animateColorAsState(
+                targetValue = if (groupSelected) PureFrost else FrostSlate,
+                animationSpec = colorSpring,
+                label = "segment_group_text",
+            )
+            val groupBadgeBg by animateColorAsState(
+                targetValue = if (groupSelected) IceCyan else Color.White.copy(alpha = 0.14f),
+                animationSpec = colorSpring,
+                label = "segment_group_badge_bg",
+            )
+
             Row(
                 modifier = Modifier
                     .weight(1f)
                     .height(38.dp)
                     .clip(RoundedCornerShape(innerRadius))
-                    .background(
-                        if (groupSelected) IceCyan.copy(alpha = 0.24f) else Color.Transparent
-                    )
+                    .background(groupBg)
                     .border(
                         width = if (groupSelected) 0.75.dp else 0.dp,
-                        color = if (groupSelected) IceCyan.copy(alpha = 0.65f) else Color.Transparent,
+                        color = groupBorder,
                         shape = RoundedCornerShape(innerRadius),
                     )
                     .clickable(
@@ -599,7 +662,7 @@ private fun TopTabSegmentedPill(
                 Icon(
                     imageVector = Icons.Rounded.FolderCopy,
                     contentDescription = null,
-                    tint = if (groupSelected) IceCyan else FrostSlate,
+                    tint = groupIconTint,
                     modifier = Modifier.size(16.dp),
                 )
                 Spacer(Modifier.width(6.dp))
@@ -607,16 +670,14 @@ private fun TopTabSegmentedPill(
                     text = "그룹",
                     maxLines = 1,
                     style = MaterialTheme.typography.labelMedium,
-                    color = if (groupSelected) PureFrost else FrostSlate,
+                    color = groupTextColor,
                 )
                 if (groupCount > 0) {
                     Spacer(Modifier.width(6.dp))
                     Box(
                         modifier = Modifier
                             .clip(CircleShape)
-                            .background(
-                                if (groupSelected) IceCyan else Color.White.copy(alpha = 0.14f)
-                            )
+                            .background(groupBadgeBg)
                             .padding(horizontal = 6.dp, vertical = 1.dp),
                         contentAlignment = Alignment.Center,
                     ) {
@@ -785,6 +846,8 @@ private fun TabPreviewGridCard(
                 val touchSlop = viewConfiguration.touchSlop
                 awaitEachGesture {
                     val down = awaitFirstDown(requireUnconsumed = false)
+                    val velocityTracker = VelocityTracker()
+                    velocityTracker.addPosition(down.uptimeMillis, down.position)
                     var totalDx = 0f
                     var totalDy = 0f
                     var decided = false
@@ -796,6 +859,7 @@ private fun TabPreviewGridCard(
                         val change = event.changes.firstOrNull { it.id == down.id } ?: break
                         if (!change.pressed) break
 
+                        velocityTracker.addPosition(change.uptimeMillis, change.position)
                         val delta = change.positionChange()
                         totalDx += delta.x
                         totalDy += delta.y
@@ -828,13 +892,21 @@ private fun TabPreviewGridCard(
                     }
 
                     if (trackingUpSwipe && !isClosing) {
-                        if (swipeCloseOffsetY.value <= -closeThresholdPx) {
+                        val vy = runCatching { velocityTracker.calculateVelocity().y }.getOrDefault(0f)
+                        val currentOffset = swipeCloseOffsetY.value
+                        val shouldClose = currentOffset <= -closeThresholdPx ||
+                            (currentOffset <= -closeThresholdPx * 0.45f && vy < -750f)
+                        if (shouldClose) {
                             isClosing = true
                             haptic.performHapticFeedback(HapticFeedbackType.LongPress)
                             coroutineScope.launch {
                                 swipeCloseOffsetY.animateTo(
                                     targetValue = -flyOutPx,
-                                    animationSpec = tween(durationMillis = 160, easing = FastOutSlowInEasing),
+                                    initialVelocity = vy.coerceAtMost(0f),
+                                    animationSpec = spring(
+                                        dampingRatio = 0.84f,
+                                        stiffness = Spring.StiffnessMediumLow,
+                                    ),
                                 )
                                 latestOnClose()
                             }
@@ -842,8 +914,9 @@ private fun TabPreviewGridCard(
                             coroutineScope.launch {
                                 swipeCloseOffsetY.animateTo(
                                     targetValue = 0f,
+                                    initialVelocity = vy,
                                     animationSpec = spring(
-                                        dampingRatio = 0.78f,
+                                        dampingRatio = 0.80f,
                                         stiffness = Spring.StiffnessMediumLow,
                                     ),
                                 )
@@ -1155,8 +1228,10 @@ private fun TabGroupsPage(
         item(key = "create_group_form") {
             AnimatedVisibility(
                 visible = showCreateGroupForm,
-                enter = expandVertically(tween(220)) + fadeIn(tween(180)),
-                exit = shrinkVertically(tween(180)) + fadeOut(tween(140)),
+                enter = expandVertically(spring(dampingRatio = 0.84f, stiffness = Spring.StiffnessMediumLow)) +
+                    fadeIn(spring(dampingRatio = 0.88f, stiffness = Spring.StiffnessMediumLow)),
+                exit = shrinkVertically(spring(dampingRatio = 0.86f, stiffness = Spring.StiffnessMediumLow)) +
+                    fadeOut(spring(dampingRatio = 0.88f, stiffness = Spring.StiffnessMediumLow)),
             ) {
                 val formShape = RoundedCornerShape(unifiedRadius)
                 Column(

@@ -190,9 +190,30 @@ data class AiCliProfile(
     val apiKey: String = "",
     val selectedModel: String = "",
     val availableModels: List<String> = emptyList(),
+    val pinnedModels: List<String> = emptyList(),
     val systemPrompt: String = DEFAULT_AI_SYSTEM_PROMPT,
     val isCustom: Boolean = false,
 ) {
+    /**
+     * Curated model list shown inside the AI Chat quick-switch dropdown.
+     * Falls back to [selectedModel] when no explicit favorites have been pinned yet.
+     */
+    fun dropdownModels(): List<String> {
+        val cleanPinned = pinnedModels
+            .map { it.trim() }
+            .filter { it.isNotEmpty() }
+            .distinct()
+        val cleanSelected = selectedModel.trim()
+        if (cleanPinned.isNotEmpty()) {
+            return if (cleanSelected.isNotEmpty() && cleanSelected !in cleanPinned) {
+                listOf(cleanSelected) + cleanPinned
+            } else {
+                cleanPinned
+            }
+        }
+        return if (cleanSelected.isNotEmpty()) listOf(cleanSelected) else emptyList()
+    }
+
     companion object {
         const val CLI_TYPE_GEMINI = "gemini"
         const val CLI_TYPE_CLAUDE = "claude"
@@ -599,6 +620,16 @@ interface BrowserCoreBridge {
     fun setAiProfileModels(
         profileId: String,
         models: List<String>,
+    ): BrowserCoreSnapshot
+
+    fun togglePinnedAiModel(
+        profileId: String,
+        modelName: String,
+    ): BrowserCoreSnapshot
+
+    fun setPinnedAiModels(
+        profileId: String,
+        pinnedModels: List<String>,
     ): BrowserCoreSnapshot
 
     fun addCustomAiProfile(
@@ -1059,25 +1090,39 @@ class LocalKotlinCore(
                         secondaryTabId = null,
                         previousActiveTabId = null,
                         tabGroups = emptyList(),
+                        preferences = if (current.preferences.foldableDualPaneEnabled) {
+                            current.preferences.copy(foldableDualPaneEnabled = false)
+                        } else {
+                            current.preferences
+                        },
                     )
                 } else {
+                    val safeLastIdx = (remaining.size - 1).coerceAtLeast(0)
                     val nextActive = if (current.activeTabId == tabId) {
-                        val fallbackIdx = (index - 1).coerceAtLeast(0).coerceAtMost(remaining.lastIndex)
+                        val fallbackIdx = (index - 1).coerceIn(0, safeLastIdx)
                         remaining[fallbackIdx].id
-                    } else {
+                    } else if (remaining.any { it.id == current.activeTabId }) {
                         current.activeTabId
+                    } else {
+                        remaining[0].id
                     }
                     val nextSecondary = current.secondaryTabId
                         ?.takeIf { secId -> secId != tabId && secId != nextActive && remaining.any { it.id == secId } }
                         ?: remaining.firstOrNull { it.id != nextActive }?.id
                     val nextPrevious = current.previousActiveTabId
                         ?.takeIf { prevId -> prevId != tabId && prevId != nextActive && remaining.any { it.id == prevId } }
+                    val nextPrefs = if (remaining.size < 2 && current.preferences.foldableDualPaneEnabled) {
+                        current.preferences.copy(foldableDualPaneEnabled = false)
+                    } else {
+                        current.preferences
+                    }
                     current.copy(
                         tabs = remaining,
                         activeTabId = nextActive,
                         secondaryTabId = nextSecondary,
                         previousActiveTabId = nextPrevious,
                         tabGroups = prunedGroups,
+                        preferences = nextPrefs,
                     )
                 }
             }
@@ -1181,22 +1226,25 @@ class LocalKotlinCore(
         progress: Int,
     ): BrowserCoreSnapshot = synchronized(lock) {
         val clampedProgress = progress.coerceIn(0, 100)
-        val security = classifySecurityInternal(url)
         _snapshotFlow.update { current ->
-            val updatedTabs = current.tabs.map { tab ->
-                if (tab.id == tabId) {
-                    tab.copy(
-                        url = url.ifBlank { tab.url },
-                        title = title.ifBlank { tab.title },
-                        canGoBack = canGoBack,
-                        canGoForward = canGoForward,
-                        isLoading = isLoading,
-                        progress = clampedProgress,
-                        securityState = security,
-                    )
-                } else {
-                    tab
-                }
+            val idx = current.tabs.indexOfFirst { it.id == tabId }
+            if (idx !in current.tabs.indices) return@update current
+            val existing = current.tabs[idx]
+            val resolvedUrl = url.ifBlank { existing.url }
+            val resolvedTitle = title.ifBlank { existing.title }
+            val security = classifySecurityInternal(resolvedUrl)
+            val updated = existing.copy(
+                url = resolvedUrl,
+                title = resolvedTitle,
+                canGoBack = canGoBack,
+                canGoForward = canGoForward,
+                isLoading = isLoading,
+                progress = clampedProgress,
+                securityState = security,
+            )
+            if (updated == existing) return@update current
+            val updatedTabs = current.tabs.toMutableList().apply {
+                this[idx] = updated
             }
             current.copy(tabs = updatedTabs)
         }
@@ -1583,6 +1631,16 @@ class LocalKotlinCore(
                     } else {
                         nextModels
                     }
+                    val existingPinned = profile.pinnedModels
+                        .map { it.trim() }
+                        .filter { it.isNotEmpty() }
+                        .distinct()
+                    val nextPinned = when {
+                        nextSelectedModel.isBlank() -> existingPinned
+                        existingPinned.isEmpty() -> listOf(nextSelectedModel)
+                        nextSelectedModel in existingPinned -> existingPinned
+                        else -> existingPinned + nextSelectedModel
+                    }
                     profile.copy(
                         name = name?.trim()?.takeIf { it.isNotEmpty() } ?: profile.name,
                         providerSubtype = providerSubtype?.trim() ?: profile.providerSubtype,
@@ -1590,6 +1648,7 @@ class LocalKotlinCore(
                         apiKey = apiKey ?: profile.apiKey,
                         selectedModel = nextSelectedModel,
                         availableModels = ensuredModels,
+                        pinnedModels = nextPinned,
                         systemPrompt = systemPrompt ?: profile.systemPrompt,
                     )
                 }
@@ -1617,10 +1676,79 @@ class LocalKotlinCore(
                             cleaned.firstOrNull() ?: profile.selectedModel
                         else -> profile.selectedModel
                     }
+                    val retainedPinned = profile.pinnedModels
+                        .map { it.trim() }
+                        .filter { it.isNotEmpty() && (cleaned.isEmpty() || it in cleaned) }
+                        .distinct()
+                    val nextPinned = when {
+                        nextSelected.isBlank() -> retainedPinned
+                        retainedPinned.isEmpty() -> listOf(nextSelected)
+                        nextSelected in retainedPinned -> retainedPinned
+                        else -> listOf(nextSelected) + retainedPinned
+                    }
                     profile.copy(
                         availableModels = cleaned,
                         selectedModel = nextSelected,
+                        pinnedModels = nextPinned,
                     )
+                }
+            }
+            current.copy(
+                preferences = current.preferences.copy(aiProfiles = updatedList)
+            )
+        }
+        _snapshotFlow.value
+    }
+
+    override fun togglePinnedAiModel(
+        profileId: String,
+        modelName: String,
+    ): BrowserCoreSnapshot = synchronized(lock) {
+        val cleanModel = modelName.trim()
+        if (cleanModel.isEmpty()) return@synchronized _snapshotFlow.value
+        _snapshotFlow.update { current ->
+            val updatedList = current.preferences.aiProfiles.map { profile ->
+                if (profile.id != profileId) {
+                    profile
+                } else {
+                    val currentPinned = profile.dropdownModels()
+                    val nextPinned = if (cleanModel in currentPinned) {
+                        if (cleanModel == profile.selectedModel.trim()) {
+                            // Keep active model pinned so the AI Chat dropdown always reflects active selection
+                            currentPinned
+                        } else {
+                            currentPinned.filterNot { it == cleanModel }
+                        }
+                    } else {
+                        currentPinned + cleanModel
+                    }
+                    profile.copy(pinnedModels = nextPinned.distinct())
+                }
+            }
+            current.copy(
+                preferences = current.preferences.copy(aiProfiles = updatedList)
+            )
+        }
+        _snapshotFlow.value
+    }
+
+    override fun setPinnedAiModels(
+        profileId: String,
+        pinnedModels: List<String>,
+    ): BrowserCoreSnapshot = synchronized(lock) {
+        val cleaned = pinnedModels.map { it.trim() }.filter { it.isNotEmpty() }.distinct()
+        _snapshotFlow.update { current ->
+            val updatedList = current.preferences.aiProfiles.map { profile ->
+                if (profile.id != profileId) {
+                    profile
+                } else {
+                    val activeModel = profile.selectedModel.trim()
+                    val resolvedPinned = when {
+                        cleaned.isEmpty() -> if (activeModel.isNotEmpty()) listOf(activeModel) else emptyList()
+                        activeModel.isNotEmpty() && activeModel !in cleaned -> listOf(activeModel) + cleaned
+                        else -> cleaned
+                    }
+                    profile.copy(pinnedModels = resolvedPinned.distinct())
                 }
             }
             current.copy(
@@ -1655,6 +1783,7 @@ class LocalKotlinCore(
             apiKey = apiKey,
             selectedModel = cleanModel,
             availableModels = if (cleanModel.isNotEmpty()) listOf(cleanModel) else emptyList(),
+            pinnedModels = if (cleanModel.isNotEmpty()) listOf(cleanModel) else emptyList(),
             systemPrompt = systemPrompt.ifBlank { AiCliProfile.DEFAULT_AI_SYSTEM_PROMPT },
             isCustom = true,
         )
@@ -1881,8 +2010,13 @@ class LocalKotlinCore(
                         val resolvedSubtype = profile.providerSubtype.ifBlank {
                             inferProviderSubtype(profile.cliType, profile.endpointOrCommand)
                         }
+                        val sanitizedPinned = profile.pinnedModels
+                            .map { it.trim() }
+                            .filter { it.isNotEmpty() }
+                            .distinct()
                         profile.copy(
                             providerSubtype = resolvedSubtype,
+                            pinnedModels = sanitizedPinned,
                         )
                     }
                 val safeActiveAiId = p.activeAiProfileId.takeIf { id ->
@@ -2034,6 +2168,7 @@ class LocalKotlinCore(
             '8', '9', 'A', 'B', 'C', 'D', 'E', 'F',
         )
         val AD_TRACKER_DOMAINS: HashSet<String> = hashSetOf(
+            // Global ad & tracker networks
             "doubleclick.net",
             "googlesyndication.com",
             "googleadservices.com",
@@ -2044,11 +2179,68 @@ class LocalKotlinCore(
             "taboola.com",
             "outbrain.com",
             "criteo.com",
+            "criteo.net",
+            "mgid.com",
             "scorecardresearch.com",
             "quantserve.com",
             "amazon-adsystem.com",
             "google-analytics.com",
             "googletagmanager.com",
+            "pubmatic.com",
+            "rubiconproject.com",
+            "openx.net",
+            "casalemedia.com",
+            "smartadserver.com",
+            "teads.tv",
+            "sharethrough.com",
+            "33across.com",
+            "triplelift.com",
+            "yieldmo.com",
+            "media.net",
+            "moatads.com",
+            "adition.com",
+            "adform.net",
+            "advertising.com",
+            "bidswitch.net",
+            "exoclick.com",
+            "popads.net",
+            "propellerads.com",
+            "clickadu.com",
+            "revcontent.com",
+            "ads-twitter.com",
+            "ads.tiktok.com",
+            "inmobi.com",
+            "tappx.com",
+            // Korean ad & analytics networks
+            "planbplus.co.kr",
+            "ad.planbplus.co.kr",
+            "dable.io",
+            "mobon.net",
+            "widerplanet.com",
+            "realclick.co.kr",
+            "adnmore.co.kr",
+            "admaru.com",
+            "adfit.kakao.com",
+            "ad.daum.net",
+            "siape.veta.naver.com",
+            "adcr.naver.com",
+            "ad.naver.com",
+            "ads.naver.com",
+            "interworksmedia.co.kr",
+            "adop.cc",
+            "cauly.co.kr",
+            "fsn.co.kr",
+            "igaworks.com",
+            "adbrix.io",
+            "acecounter.com",
+            "netinsight.co.kr",
+            "mediacategory.com",
+            "adbay.co.kr",
+            "ad4989.co.kr",
+            "clickmon.co.kr",
+            "targetpush.co.kr",
+            "admixer.co.kr",
+            "nasmedia.co.kr",
         )
     }
 }

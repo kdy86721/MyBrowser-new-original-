@@ -3,7 +3,8 @@ package com.example.ui.screens
 import androidx.activity.compose.BackHandler
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.AnimatedVisibility
-import androidx.compose.animation.core.tween
+import androidx.compose.animation.core.Spring
+import androidx.compose.animation.core.spring
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.slideInHorizontally
@@ -12,6 +13,7 @@ import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
@@ -102,6 +104,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
@@ -207,6 +210,8 @@ fun SettingsSheet(
         systemPrompt: String?,
         providerSubtype: String?,
     ) -> Unit,
+    onTogglePinnedAiModel: (profileId: String, modelName: String) -> Unit,
+    onSetPinnedAiModels: (profileId: String, pinnedModels: List<String>) -> Unit,
     onAddCustomAiProfile: (
         name: String,
         cliType: String,
@@ -259,6 +264,9 @@ fun SettingsSheet(
         modifier = Modifier
             .fillMaxSize()
             .background(fullScreenBackground)
+            .pointerInput(Unit) {
+                detectTapGestures { /* consume stray taps above underlying WebView */ }
+            }
             .testTag("settings_push_root"),
         contentAlignment = Alignment.TopCenter,
     ) {
@@ -273,12 +281,20 @@ fun SettingsSheet(
                 targetState = activeCategory,
                 transitionSpec = {
                     val forward = targetState != null
+                    val pushSpring = spring<androidx.compose.ui.unit.IntOffset>(
+                        dampingRatio = 0.86f,
+                        stiffness = Spring.StiffnessMediumLow,
+                    )
+                    val fadeSpring = spring<Float>(
+                        dampingRatio = 0.88f,
+                        stiffness = Spring.StiffnessMediumLow,
+                    )
                     if (forward) {
-                        (slideInHorizontally(tween(240)) { it / 3 } + fadeIn(tween(220))) togetherWith
-                            (slideOutHorizontally(tween(200)) { -it / 5 } + fadeOut(tween(160)))
+                        (slideInHorizontally(pushSpring) { it / 3 } + fadeIn(fadeSpring)) togetherWith
+                            (slideOutHorizontally(pushSpring) { -it / 5 } + fadeOut(fadeSpring))
                     } else {
-                        (slideInHorizontally(tween(240)) { -it / 5 } + fadeIn(tween(220))) togetherWith
-                            (slideOutHorizontally(tween(200)) { it / 3 } + fadeOut(tween(160)))
+                        (slideInHorizontally(pushSpring) { -it / 5 } + fadeIn(fadeSpring)) togetherWith
+                            (slideOutHorizontally(pushSpring) { it / 3 } + fadeOut(fadeSpring))
                     }
                 },
                 label = "settings_category_navigation",
@@ -409,6 +425,8 @@ fun SettingsSheet(
                                     onUpdateGestureSettings(null, null, null, null, null, null, enabled)
                                 },
                                 onUpdateAiProfile = onUpdateAiProfile,
+                                onTogglePinnedAiModel = onTogglePinnedAiModel,
+                                onSetPinnedAiModels = onSetPinnedAiModels,
                                 onAddCustomAiProfile = onAddCustomAiProfile,
                                 onDeleteAiProfile = onDeleteAiProfile,
                             )
@@ -494,6 +512,9 @@ fun HistoryAndBookmarksSheet(
         modifier = Modifier
             .fillMaxSize()
             .background(fullScreenBackground)
+            .pointerInput(Unit) {
+                detectTapGestures { /* consume stray taps above underlying WebView */ }
+            }
             .testTag("history_bookmarks_sheet"),
         contentAlignment = Alignment.TopCenter,
     ) {
