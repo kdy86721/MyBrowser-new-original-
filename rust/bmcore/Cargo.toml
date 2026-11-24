@@ -1,0 +1,22 @@
+[package]
+name = "bmcore"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "Native (Rust) core algorithms for MyBrowser(BM): URL resolution, ad-block matching and string sanitizers exposed over JNI."
+
+[lib]
+# cdylib -> libbmcore.so loaded by Android; rlib -> lets `cargo test` link the pure logic.
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+jni = { version = "0.21", default-features = false }
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+strip = true
+# Keep unwinding so the JNI layer can turn an unexpected panic into a safe fallback value
+# instead of aborting the whole browser process.
+panic = "unwind"

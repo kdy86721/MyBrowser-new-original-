@@ -1,6 +1,6 @@
 {
   "name": "MyBrowser(BM)",
-  "description": "Minimalist AOSP liquid-glass web browser with a Rust-ready FFI core boundary and icon-only floating controls.",
+  "description": "Minimalist AOSP liquid-glass web browser with a native Rust core (JNI) for URL resolution and ad-blocking and icon-only floating controls.",
   "requestFramePermissions": [],
   "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
 }

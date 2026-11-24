@@ -22,6 +22,7 @@ import android.webkit.URLUtil
 import android.webkit.WebSettings
 import android.webkit.WebView
 import android.widget.Toast
+import com.example.core.CoreAlgorithms
 import java.io.File
 import java.io.FileOutputStream
 import java.util.concurrent.Executors
@@ -129,13 +130,7 @@ object WebViewWarmupPool {
         return sanitized
     }
 
-    fun sanitizeMobileUserAgent(rawUa: String): String {
-        return rawUa
-            .replace(Regex(";\\s*wv(?=\\))"), "")
-            .replace(Regex("\\bVersion/\\d+\\.\\d+\\s*"), "")
-            .replace(Regex("\\s{2,}"), " ")
-            .trim()
-    }
+    fun sanitizeMobileUserAgent(rawUa: String): String = CoreAlgorithms.sanitizeUserAgent(rawUa)
 }
 
 object WebViewExternalNavigator {
@@ -575,35 +570,10 @@ private fun guessSafeFileName(
 private fun sanitizeDownloadFileName(
     rawName: String?,
     mimeType: String?,
-): String {
-    val cleaned = rawName
-        ?.trim()
-        ?.replace(Regex("[\\\\/:*?\"<>|]"), "_")
-        ?.takeIf { it.isNotBlank() && it != "downloadfile.bin" }
+): String = CoreAlgorithms.sanitizeDownloadFileName(
+    rawName = rawName,
+    mimeType = mimeType,
+    fallbackStem = "download_${System.currentTimeMillis()}",
+)
 
-    if (cleaned != null) return cleaned
-
-    val ext = when (mimeType?.lowercase()?.substringBefore(';')?.trim()) {
-        "image/png" -> "png"
-        "image/jpeg", "image/jpg" -> "jpg"
-        "image/webp" -> "webp"
-        "image/gif" -> "gif"
-        "application/pdf" -> "pdf"
-        "text/plain" -> "txt"
-        "text/csv" -> "csv"
-        "application/json" -> "json"
-        "application/zip" -> "zip"
-        "video/mp4" -> "mp4"
-        "audio/mpeg" -> "mp3"
-        else -> "bin"
-    }
-    return "download_${System.currentTimeMillis()}.$ext"
-}
-
-private fun escapeJsSingleQuoted(value: String): String {
-    return value
-        .replace("\\", "\\\\")
-        .replace("'", "\\'")
-        .replace("\n", "\\n")
-        .replace("\r", "\\r")
-}
+private fun escapeJsSingleQuoted(value: String): String = CoreAlgorithms.escapeJsSingleQuoted(value)

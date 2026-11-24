@@ -423,7 +423,7 @@ data class BrowserCoreSnapshot(
     val preferences: BrowserPreferences,
     val historyCount: Int,
     val bookmarks: List<BookmarkEntry> = emptyList(),
-    val engineBackendName: String = "LocalKotlinCore (FFI-Ready)",
+    val engineBackendName: String = CoreAlgorithms.backendLabel,
 ) {
     val activeTab: BrowserTabState?
         get() = tabs.firstOrNull { it.id == activeTabId } ?: tabs.firstOrNull()
@@ -675,8 +675,9 @@ interface BrowserCoreBridge {
 }
 
 /**
- * Pure-Kotlin reference implementation of [BrowserCoreBridge].
- * Zero Android framework imports. Thread-safe in-memory state with JSON serialization support.
+ * Reference implementation of [BrowserCoreBridge]: thread-safe in-memory tab/preference state with
+ * JSON serialization. Stateless hot-path algorithms (URL resolution, ad-block matching, security
+ * classification) run in the Rust `bmcore` library via [CoreAlgorithms], with a Kotlin fallback.
  */
 class LocalKotlinCore(
     initialHomeUrl: String = "https://duckduckgo.com",
@@ -711,7 +712,7 @@ class LocalKotlinCore(
             preferences = BrowserPreferences(homeUrl = initialHomeUrl),
             historyCount = 0,
             bookmarks = emptyList(),
-            engineBackendName = "LocalKotlinCore (Pure Kotlin / FFI-Ready)",
+            engineBackendName = CoreAlgorithms.backendLabel,
         )
     )
     override val snapshotFlow: StateFlow<BrowserCoreSnapshot> = _snapshotFlow.asStateFlow()
@@ -719,87 +720,17 @@ class LocalKotlinCore(
     override fun getSnapshot(): BrowserCoreSnapshot = _snapshotFlow.value
 
     override fun normalizeOrSearch(rawInput: String): String {
-        val trimmed = rawInput.trim()
         val prefs = _snapshotFlow.value.preferences
-        if (trimmed.isEmpty()) {
-            return prefs.homeUrl
-        }
-
-        val lower = trimmed.lowercase()
-        if (lower.startsWith("https://") ||
-            lower.startsWith("http://") ||
-            lower.startsWith("about:") ||
-            lower.startsWith("file://") ||
-            lower.startsWith("data:")
-        ) {
-            return when {
-                lower.startsWith("https://") -> "https://" + trimmed.substring(8)
-                lower.startsWith("http://") -> "http://" + trimmed.substring(7)
-                else -> trimmed
-            }
-        }
-
-        val hasWhitespace = trimmed.any { it.isWhitespace() }
-        if (!hasWhitespace) {
-            val hostPart = trimmed.substringBefore('/').substringBefore('?')
-            val hostWithoutPort = hostPart.substringBefore(':')
-            val portPart = hostPart.substringAfter(':', "")
-            val validPort = portPart.isEmpty() || portPart.all { it.isDigit() }
-
-            if (validPort && isLocalOrIpHost(hostWithoutPort)) {
-                return "http://$trimmed"
-            }
-
-            if (validPort && looksLikeDomain(hostWithoutPort)) {
-                return "https://$trimmed"
-            }
-        }
-
-        val encodedQuery = percentEncodeUtf8(trimmed)
-        return prefs.searchEngine.queryTemplate.replace("%s", encodedQuery)
+        return CoreAlgorithms.normalizeOrSearch(rawInput, prefs.homeUrl, prefs.searchEngine.queryTemplate)
     }
 
-    override fun formatDisplayUrl(url: String): String {
-        val trimmed = url.trim()
-        if (trimmed.isEmpty()) return ""
-        val withoutScheme = when {
-            trimmed.startsWith("https://", ignoreCase = true) -> trimmed.substring(8)
-            trimmed.startsWith("http://", ignoreCase = true) -> trimmed.substring(7)
-            else -> trimmed
-        }
-        val withoutWww = if (withoutScheme.startsWith("www.", ignoreCase = true)) {
-            withoutScheme.substring(4)
-        } else {
-            withoutScheme
-        }
-        return withoutWww.trimEnd('/')
-    }
+    override fun formatDisplayUrl(url: String): String = CoreAlgorithms.formatDisplayUrl(url)
 
     override fun classifySecurity(url: String): SecurityState = classifySecurityInternal(url)
 
-    override fun shouldBlockUrl(url: String): Boolean {
-        if (!_snapshotFlow.value.preferences.adBlockEnabled) return false
-        val lower = url.trim().lowercase()
-        if (lower.isEmpty()) return false
-        val host = lower
-            .removePrefix("https://")
-            .removePrefix("http://")
-            .substringBefore('/')
-            .substringBefore('?')
-            .substringBefore('#')
-            .substringBefore(':')
-        if (host.isEmpty()) return false
-        if (host in AD_TRACKER_DOMAINS) return true
-
-        // Walk parent domains for O(1) HashSet lookup per subdomain level
-        var dotIdx = host.indexOf('.')
-        while (dotIdx >= 0 && dotIdx < host.lastIndex) {
-            val parent = host.substring(dotIdx + 1)
-            if (parent in AD_TRACKER_DOMAINS) return true
-            dotIdx = host.indexOf('.', dotIdx + 1)
-        }
-        return false
-    }
+    /** Hot path: evaluated for every WebView sub-resource request when ad-block is on. */
+    override fun shouldBlockUrl(url: String): Boolean =
+        _snapshotFlow.value.preferences.adBlockEnabled && CoreAlgorithms.isAdTrackerUrl(url)
 
     override fun shouldBlockRequest(url: String): Boolean = shouldBlockUrl(url)
 
@@ -2081,7 +2012,7 @@ class LocalKotlinCore(
                     preferences = clampedPrefs,
                     historyCount = historyBuffer.size,
                     bookmarks = bookmarkList.toList(),
-                    engineBackendName = "LocalKotlinCore (Pure Kotlin / FFI-Ready)",
+                    engineBackendName = CoreAlgorithms.backendLabel,
                 )
                 true
             }.getOrDefault(false)
@@ -2090,157 +2021,14 @@ class LocalKotlinCore(
     private fun extractNumericSuffix(id: String, prefix: String): Long? =
         if (id.startsWith(prefix)) id.removePrefix(prefix).toLongOrNull() else null
 
-    private fun inferProviderSubtype(cliType: String, endpoint: String): String {
-        if (cliType != AiCliProfile.CLI_TYPE_KIMI) return ""
-        val lower = endpoint.trim().lowercase()
-        return when {
-            lower.contains("api.kimi.com/coding") -> AiCliProfile.KIMI_SUBTYPE_CODE
-            lower.contains("moonshot.cn") -> AiCliProfile.KIMI_SUBTYPE_CHINA
-            lower.startsWith("http://127.0.0.1") ||
-                lower.startsWith("http://localhost") ||
-                lower.startsWith("http://10.0.2.2") -> AiCliProfile.KIMI_SUBTYPE_LOCAL
-            else -> AiCliProfile.KIMI_SUBTYPE_GLOBAL
-        }
-    }
+    private fun inferProviderSubtype(cliType: String, endpoint: String): String =
+        CoreAlgorithms.inferProviderSubtype(cliType, endpoint)
 
     private fun nextTabId(): String = "tab_${tabSequence++}"
 
-    private fun classifySecurityInternal(url: String): SecurityState {
-        val lower = url.trim().lowercase()
-        return when {
-            lower.startsWith("https://") -> SecurityState.SECURE
-            lower.startsWith("http://") -> SecurityState.INSECURE
-            else -> SecurityState.NEUTRAL
-        }
-    }
-
-    private fun isLocalOrIpHost(host: String): Boolean {
-        if (host.equals("localhost", ignoreCase = true)) return true
-        val parts = host.split('.')
-        if (parts.size == 4 && parts.all { part ->
-                val num = part.toIntOrNull()
-                num != null && num in 0..255
-            }
-        ) {
-            return true
-        }
-        return false
-    }
-
-    private fun looksLikeDomain(host: String): Boolean {
-        if (host.length < 3 || !host.contains('.')) return false
-        if (host.startsWith('.') || host.endsWith('.')) return false
-        val labels = host.split('.')
-        val tld = labels.lastOrNull() ?: return false
-        if (tld.length < 2 || !tld.all { it.isLetter() }) return false
-        return labels.all { label ->
-            label.isNotEmpty() &&
-                !label.startsWith('-') &&
-                !label.endsWith('-') &&
-                label.all { it.isLetterOrDigit() || it == '-' }
-        }
-    }
-
-    private fun percentEncodeUtf8(input: String): String {
-        val bytes = input.encodeToByteArray()
-        val sb = StringBuilder(bytes.size * 2)
-        for (b in bytes) {
-            val code = b.toInt() and 0xFF
-            val c = code.toChar()
-            when {
-                c in 'a'..'z' || c in 'A'..'Z' || c in '0'..'9' ||
-                    c == '-' || c == '_' || c == '.' || c == '~' -> sb.append(c)
-                c == ' ' -> sb.append('+')
-                else -> {
-                    sb.append('%')
-                    sb.append(HEX_DIGITS[code ushr 4])
-                    sb.append(HEX_DIGITS[code and 0x0F])
-                }
-            }
-        }
-        return sb.toString()
-    }
+    private fun classifySecurityInternal(url: String): SecurityState = CoreAlgorithms.classifySecurity(url)
 
     private companion object {
         const val MAX_HISTORY_ENTRIES = 500
-        val HEX_DIGITS = charArrayOf(
-            '0', '1', '2', '3', '4', '5', '6', '7',
-            '8', '9', 'A', 'B', 'C', 'D', 'E', 'F',
-        )
-        val AD_TRACKER_DOMAINS: HashSet<String> = hashSetOf(
-            // Global ad & tracker networks
-            "doubleclick.net",
-            "googlesyndication.com",
-            "googleadservices.com",
-            "adservice.google.com",
-            "pagead2.googlesyndication.com",
-            "adnxs.com",
-            "adsrvr.org",
-            "taboola.com",
-            "outbrain.com",
-            "criteo.com",
-            "criteo.net",
-            "mgid.com",
-            "scorecardresearch.com",
-            "quantserve.com",
-            "amazon-adsystem.com",
-            "google-analytics.com",
-            "googletagmanager.com",
-            "pubmatic.com",
-            "rubiconproject.com",
-            "openx.net",
-            "casalemedia.com",
-            "smartadserver.com",
-            "teads.tv",
-            "sharethrough.com",
-            "33across.com",
-            "triplelift.com",
-            "yieldmo.com",
-            "media.net",
-            "moatads.com",
-            "adition.com",
-            "adform.net",
-            "advertising.com",
-            "bidswitch.net",
-            "exoclick.com",
-            "popads.net",
-            "propellerads.com",
-            "clickadu.com",
-            "revcontent.com",
-            "ads-twitter.com",
-            "ads.tiktok.com",
-            "inmobi.com",
-            "tappx.com",
-            // Korean ad & analytics networks
-            "planbplus.co.kr",
-            "ad.planbplus.co.kr",
-            "dable.io",
-            "mobon.net",
-            "widerplanet.com",
-            "realclick.co.kr",
-            "adnmore.co.kr",
-            "admaru.com",
-            "adfit.kakao.com",
-            "ad.daum.net",
-            "siape.veta.naver.com",
-            "adcr.naver.com",
-            "ad.naver.com",
-            "ads.naver.com",
-            "interworksmedia.co.kr",
-            "adop.cc",
-            "cauly.co.kr",
-            "fsn.co.kr",
-            "igaworks.com",
-            "adbrix.io",
-            "acecounter.com",
-            "netinsight.co.kr",
-            "mediacategory.com",
-            "adbay.co.kr",
-            "ad4989.co.kr",
-            "clickmon.co.kr",
-            "targetpush.co.kr",
-            "admixer.co.kr",
-            "nasmedia.co.kr",
-        )
     }
 }

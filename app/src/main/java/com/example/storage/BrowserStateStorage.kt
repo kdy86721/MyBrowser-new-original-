@@ -3,7 +3,7 @@ package com.example.storage
 import android.content.Context
 import android.os.Bundle
 import android.os.Parcel
-import org.json.JSONArray
+import com.example.core.CoreAlgorithms
 import org.json.JSONObject
 import java.io.File
 import java.io.FileOutputStream
@@ -12,9 +12,9 @@ import java.io.FileOutputStream
  * Pure AOSP atomic file persistence for browser configuration, AI CLI profiles, open tabs,
  * and per-tab WebView navigation history Bundles across background process death.
  *
- * Uses `org.json.JSONObject` / `JSONArray` for validated atomic config writes
- * (`filesDir/browser_config.json`) and Android `Parcel` binary snapshots
- * (`filesDir/tab_states/{tabId}.state`) with zero GMS or external dependencies.
+ * Writes the config atomically (`filesDir/browser_config.json`, validated with `org.json` on load)
+ * and stores Android `Parcel` binary snapshots (`filesDir/tab_states/{tabId}.state`), with zero GMS
+ * or external dependencies.
  */
 class BrowserStateStorage(
     private val filesDir: File,
@@ -28,32 +28,42 @@ class BrowserStateStorage(
 
     /**
      * Atomically writes the serialized browser configuration, AI profiles, tabs, history, and bookmarks
-     * to `browser_config.json` after validating structure with `org.json.JSONObject` / `JSONArray`.
+     * to `browser_config.json`.
+     *
+     * The payload comes straight from the core's kotlinx.serialization exporter, so instead of a full
+     * `org.json` parse + re-serialization on every save, the metadata fields are spliced into the
+     * top-level object and only a cheap structural check is performed. The previous file is rotated
+     * to the backup slot with a rename rather than a byte-for-byte copy.
      */
     fun saveConfigJson(rawStateJson: String): Boolean = synchronized(ioLock) {
         runCatching {
-            // Validate & normalize top-level JSON structure via org.json
-            val root = JSONObject(rawStateJson)
-            val tabsArr: JSONArray = root.optJSONArray("tabs") ?: JSONArray()
-            if (tabsArr.length() == 0) return@runCatching false
-            root.put("schemaVersion", SCHEMA_VERSION)
-            root.put("savedAtEpochMs", System.currentTimeMillis())
+            val body = rawStateJson.trim()
+            if (!body.startsWith('{') || !body.endsWith('}') || !body.contains(NON_EMPTY_TABS_MARKER)) {
+                return@runCatching false
+            }
+            val payload = buildString(body.length + 64) {
+                append("{\"schemaVersion\":").append(SCHEMA_VERSION)
+                append(",\"savedAtEpochMs\":").append(System.currentTimeMillis())
+                append(',')
+                append(body, 1, body.length)
+            }
 
             if (!filesDir.exists()) {
                 filesDir.mkdirs()
             }
 
-            val payloadBytes = root.toString().toByteArray(Charsets.UTF_8)
             val tmpFile = File(filesDir, "$CONFIG_FILE_NAME.tmp")
             FileOutputStream(tmpFile).use { fos ->
-                fos.write(payloadBytes)
+                fos.write(payload.toByteArray(Charsets.UTF_8))
                 fos.flush()
                 runCatching { fos.fd.sync() }
             }
 
-            // Preserve last known-good backup before atomic swap
+            // Rotate the last known-good file into the backup slot (atomic rename, no copy).
             if (configFile.exists() && configFile.length() > 0L) {
-                runCatching { configFile.copyTo(configBackupFile, overwrite = true) }
+                if (!configFile.renameTo(configBackupFile)) {
+                    runCatching { configFile.copyTo(configBackupFile, overwrite = true) }
+                }
             }
 
             if (!tmpFile.renameTo(configFile)) {
@@ -147,8 +157,7 @@ class BrowserStateStorage(
     private fun tabStateFile(tabId: String): File =
         File(tabStatesDir, "${sanitizeFileName(tabId)}.state")
 
-    private fun sanitizeFileName(raw: String): String =
-        raw.replace(Regex("[^a-zA-Z0-9._-]"), "_")
+    private fun sanitizeFileName(raw: String): String = CoreAlgorithms.sanitizeStateFileName(raw)
 
     private fun marshalBundle(bundle: Bundle): ByteArray? {
         val parcel = Parcel.obtain()
@@ -178,6 +187,8 @@ class BrowserStateStorage(
 
     companion object {
         private const val SCHEMA_VERSION = 2
+        /** Compact kotlinx.serialization output of a non-empty `tabs` array. */
+        private const val NON_EMPTY_TABS_MARKER = "\"tabs\":[{"
         const val CONFIG_FILE_NAME = "browser_config.json"
         private const val CONFIG_BACKUP_FILE_NAME = "browser_config.json.bak"
         const val TAB_STATES_DIR_NAME = "tab_states"

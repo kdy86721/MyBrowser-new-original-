@@ -40,7 +40,13 @@
 }
 -keep @kotlinx.serialization.Serializable class com.example.** { *; }
 
-# --- Rust FFI-ready core boundary models & bridge ---
+# --- Rust core (libbmcore.so) JNI entry points: symbol names are derived from class + method names ---
+-keepclasseswithmembernames,includedescriptorclasses class * {
+    native <methods>;
+}
+-keep class com.example.core.NativeBrowserCore { *; }
+
+# --- Core boundary models & bridge ---
 -keep class com.example.core.BrowserCoreBridge { *; }
 -keep class com.example.core.** {
     public *;

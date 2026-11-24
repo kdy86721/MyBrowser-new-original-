@@ -183,10 +183,14 @@ import com.example.webview.WebViewWarmupPool
 import com.example.webview.dispatchWebViewDownload
 import androidx.lifecycle.viewModelScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.FlowPreview
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.debounce
+import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.drop
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -263,6 +267,15 @@ private class PaneUiState {
 }
 
 private const val MAX_LIVE_WEBVIEWS = 4
+private const val PERSIST_DEBOUNCE_MS = 400L
+
+/** Snapshot with per-navigation transient fields zeroed, used to detect persist-worthy changes. */
+private fun BrowserCoreSnapshot.withoutTransientTabState(): BrowserCoreSnapshot =
+    if (tabs.none { it.isLoading || it.progress != 0 }) {
+        this
+    } else {
+        copy(tabs = tabs.map { if (it.isLoading || it.progress != 0) it.copy(isLoading = false, progress = 0) else it })
+    }
 
 class BrowserViewModel(
     private val core: BrowserCoreBridge = LocalKotlinCore(),
@@ -289,17 +302,40 @@ class BrowserViewModel(
                 storage?.saveConfigJson(core.exportStateJson())
             }
         }
+        if (storage != null) {
+            launchDebouncedPersistence(storage)
+        }
+    }
+
+    /**
+     * Persists state off the main thread, but only when something durable changed: page-load
+     * progress / loading flags (which tick many times per navigation) are ignored, bursts of
+     * changes are coalesced, and stale tab-state pruning runs only when the tab set changes.
+     * [persistConfigSync] still flushes synchronously from the lifecycle callbacks.
+     */
+    @OptIn(FlowPreview::class)
+    private fun launchDebouncedPersistence(storage: BrowserStateStorage) {
         viewModelScope.launch(Dispatchers.IO) {
-            core.snapshotFlow.drop(1).collect { snap ->
-                persistMutex.withLock {
-                    storage?.saveConfigJson(core.exportStateJson())
-                    val nonIncognitoIds = snap.tabs
-                        .filterNot { it.isIncognito }
-                        .map { it.id }
-                        .toSet()
-                    storage?.pruneStaleTabStates(nonIncognitoIds)
+            var lastPrunedTabIds: Set<String>? = null
+            core.snapshotFlow
+                .drop(1)
+                .map { it.withoutTransientTabState() }
+                .distinctUntilChanged()
+                .debounce(PERSIST_DEBOUNCE_MS)
+                .collect {
+                    persistMutex.withLock {
+                        storage.saveConfigJson(core.exportStateJson())
+                        val nonIncognitoIds = core.getSnapshot().tabs
+                            .asSequence()
+                            .filterNot { tab -> tab.isIncognito }
+                            .map { tab -> tab.id }
+                            .toSet()
+                        if (nonIncognitoIds != lastPrunedTabIds) {
+                            storage.pruneStaleTabStates(nonIncognitoIds)
+                            lastPrunedTabIds = nonIncognitoIds
+                        }
+                    }
                 }
-            }
         }
     }
 
